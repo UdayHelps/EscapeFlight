@@ -136,27 +136,31 @@ function loadFallbackAirports() {
   console.log(`Fallback DB: ${Object.keys(AIRPORT_DB).length} airports`);
 }
 
-// ── AeroDataBox: fetch flights for an airport (arrivals or departures) ─
+// ── AeroDataBox: fetch flights for an airport ─────────────────────────
 async function fetchFlights(iataCode, direction) {
   const cacheKey = `${iataCode}-${direction}`;
   const cached = getCached(cacheKey);
   if (cached) { console.log(`[Cache] ${iataCode} ${direction}`); return cached; }
 
-  // AeroDataBox uses a time window — last 12h to next 12h
+  // Use ICAO code — look it up from airport DB
+  const ap = AIRPORT_DB[iataCode];
+  const icao = ap?.icao || iataCode;
+
+  // Time window: last 12h to next 12h
   const now = new Date();
   const from = new Date(now.getTime() - 12 * 60 * 60 * 1000);
   const to = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+  const fmt = d => d.toISOString().slice(0, 16);
 
-  const fmt = d => d.toISOString().slice(0, 16); // "2026-03-04T08:30"
-
-  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/iata/${iataCode}/${fmt(from)}/${fmt(to)}`;
+  // AeroDataBox correct endpoint format
+  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmt(from)}/${fmt(to)}`;
 
   try {
-    console.log(`[AeroDataBox] Fetching ${direction} for ${iataCode}...`);
+    console.log(`[AeroDataBox] ${direction} for ${iataCode} (${icao})...`);
     const resp = await axios.get(url, {
       params: {
         withLeg: "true",
-        direction: direction, // "Arrival" or "Departure"
+        direction: direction,   // "Arrival" or "Departure"
         withCancelled: "true",
         withCodeshared: "false",
         withCargo: "false",
@@ -174,7 +178,7 @@ async function fetchFlights(iataCode, direction) {
     setCache(cacheKey, flights);
     return flights;
   } catch (e) {
-    console.error(`[AeroDataBox] ${iataCode} ${direction} failed:`, e.response?.data || e.message);
+    console.error(`[AeroDataBox] ${iataCode} ${direction} failed:`, e.response?.status, e.response?.data || e.message);
     return [];
   }
 }
@@ -448,6 +452,39 @@ app.get("/api/health", async (req, res) => {
     dataSource: "aerodatabox",
     time: new Date().toISOString(),
   });
+});
+
+// ── /api/test — test AeroDataBox directly ────────────────────────────
+app.get("/api/test", async (req, res) => {
+  await loadAirportDB();
+  const airport = req.query.airport || "DXB";
+  const ap = AIRPORT_DB[airport];
+  if (!ap) return res.status(400).json({ error: `Airport not found: ${airport}` });
+
+  const now = new Date();
+  const from = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+  const to = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+  const fmt = d => d.toISOString().slice(0, 16);
+  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${ap.icao}/${fmt(from)}/${fmt(to)}`;
+
+  try {
+    const resp = await axios.get(url, {
+      params: { withLeg: "true", direction: "Departure", withCancelled: "true", withCodeshared: "false", withCargo: "false", withPrivate: "false" },
+      headers: { "x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST },
+      timeout: 15000,
+    });
+    res.json({
+      url,
+      icao: ap.icao,
+      status: resp.status,
+      keys: Object.keys(resp.data || {}),
+      departureCount: resp.data?.departures?.length || 0,
+      arrivalCount: resp.data?.arrivals?.length || 0,
+      sample: resp.data?.departures?.[0] || resp.data?.arrivals?.[0] || null,
+    });
+  } catch (e) {
+    res.json({ error: e.message, status: e.response?.status, data: e.response?.data, url });
+  }
 });
 
 const PORT = process.env.PORT || 3001;
