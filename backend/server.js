@@ -147,8 +147,8 @@ async function fetchFlights(iataCode, direction) {
   if (!icao) { console.error(`No ICAO for ${iataCode}`); return []; }
 
   const now = new Date();
-  const from = new Date(now.getTime() - 12 * 60 * 60 * 1000);
-  const to = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+  const from = new Date(now.getTime() - 6 * 60 * 60 * 1000);  // 6h ago
+  const to = new Date(now.getTime() + 6 * 60 * 60 * 1000);    // 6h ahead (= 12h total)
   const fmt = d => d.toISOString().slice(0, 16);
 
   const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmt(from)}/${fmt(to)}`;
@@ -449,8 +449,8 @@ app.get("/api/test", async (req, res) => {
   if (!ap) return res.status(400).json({ error: `Airport not found: ${airport}` });
 
   const now = new Date();
-  const from = new Date(now.getTime() - 12 * 60 * 60 * 1000);
-  const to = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+  const from = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+  const to = new Date(now.getTime() + 6 * 60 * 60 * 1000);
   const fmt = d => d.toISOString().slice(0, 16);
   const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${ap.icao}/${fmt(from)}/${fmt(to)}`;
 
