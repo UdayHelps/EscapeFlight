@@ -183,7 +183,6 @@ export default function App() {
             <div style={{width:36,height:36,borderRadius:8,background:"linear-gradient(135deg,#f97316,#ef4444)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>✈</div>
             <div>
               <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,letterSpacing:"-0.5px",color:"#f1f5f9"}}>ESCAPE<span style={{color:"#f97316"}}>ROUTE</span></div>
-              <div style={{fontSize:9,color:"#64748b",letterSpacing:"2px"}}>REAL-TIME FLIGHT INTELLIGENCE · ANY ROUTE WORLDWIDE</div>
             </div>
           </div>
           <span style={{display:"flex",alignItems:"center",gap:4,color:"#64748b",fontSize:11}}>
@@ -231,8 +230,7 @@ export default function App() {
         {!loading&&result&&(
           <div className="fade-in">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:8}}>
-              <div style={{fontSize:11,color:"#64748b"}}>{result.origin?.city} → {result.destination?.city} · Last 24h real flight data</div>
-              <span style={{fontSize:10,color:"#4ade80",border:"1px solid #4ade8044",borderRadius:4,padding:"2px 8px"}}>◉ AERODATABOX LIVE</span>
+              <div style={{fontSize:11,color:"#64748b"}}>{result.origin?.city} → {result.destination?.city} · Flights from last 8h + next 4h</div>
             </div>
 
             <div className="mg" style={{display:"grid",gridTemplateColumns:"clamp(280px,30%,360px) 1fr",gap:20}}>
@@ -267,10 +265,7 @@ export default function App() {
                     </div>
                   </div>
                 ))}
-                <div style={{background:"#7c2d12",border:"1px solid #9a3412",borderRadius:10,padding:"12px 14px",marginTop:8,fontSize:11}}>
-                  <div style={{color:"#fb923c",fontWeight:"bold",marginBottom:4}}>⚠ ZONE ADVISORY</div>
-                  <div style={{color:"#fdba74",lineHeight:1.5}}>Verify active NOTAMs before travel. Data reflects last 24h actual operations.</div>
-                </div>
+
               </div>
 
               {selectedRoute&&(
@@ -311,7 +306,7 @@ export default function App() {
                   {activeTab==="flights"&&(
                     <div className="fade-in" style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:12,overflow:"hidden"}}>
                       <div style={{padding:"12px 20px",borderBottom:"1px solid #1e293b",fontSize:10,color:"#64748b",letterSpacing:"3px"}}>
-                        ▸ FLIGHT STATUS — LAST 24H ({selectedRoute.flights.length} flights)
+                        ▸ FLIGHTS ({selectedRoute.flights.length} found · last 8h + next 4h)
                       </div>
                       {selectedRoute.flights.length===0?(
                         <div style={{padding:40,textAlign:"center",color:"#64748b",fontSize:12,lineHeight:2}}>
@@ -428,15 +423,11 @@ export default function App() {
           <div style={{textAlign:"center",padding:"80px 20px",color:"#475569"}}>
             <div style={{fontSize:60,marginBottom:16,opacity:.3}}>✈</div>
             <div style={{fontSize:13,letterSpacing:"3px"}}>ENTER ANY ROUTE TO BEGIN</div>
-            <div style={{fontSize:11,marginTop:8}}>Real flight data · 6,000+ airports · Powered by AeroDataBox</div>
+            <div style={{fontSize:11,marginTop:8}}>Covers major international airports · 8h past + 4h ahead</div>
           </div>
         )}
 
-        <div style={{marginTop:40,padding:"20px 0",borderTop:"1px solid #1e293b",display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:8,fontSize:10,color:"#334155"}}>
-          <span>ESCAPEROUTE FLIGHT INTELLIGENCE © 2026</span>
-          <span>POWERED BY: AeroDataBox via RapidAPI</span>
-          <span>FOR INFORMATIONAL USE ONLY</span>
-        </div>
+
       </div>
     </div>
   );
