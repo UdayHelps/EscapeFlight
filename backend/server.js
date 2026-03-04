@@ -147,8 +147,8 @@ async function fetchFlights(iataCode, direction) {
   if (!icao) { console.error(`No ICAO for ${iataCode}`); return []; }
 
   const now = new Date();
-  const from = new Date(now.getTime() - 6 * 60 * 60 * 1000);  // 6h ago
-  const to = new Date(now.getTime() + 6 * 60 * 60 * 1000);    // 6h ahead (= 12h total)
+  const from = new Date(now.getTime() - 11 * 60 * 60 * 1000);  // 11h ago to catch landed flights
+  const to = new Date(now.getTime() + 1 * 60 * 60 * 1000);     // 1h ahead (= 12h total max)
   const fmt = d => d.toISOString().slice(0, 16);
 
   const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmt(from)}/${fmt(to)}`;
@@ -187,10 +187,11 @@ function mapFlight(f, impliedDepIata, impliedArrIata) {
   const airlineName = f.airline?.name || "Unknown Airline";
   const airlineCode = f.airline?.iata || f.airline?.icao || flightNum.slice(0, 2);
 
+  // Use implied airports when API doesn't return them (e.g. departure airport on departure queries)
   const depAirport = f.departure?.airport?.iata || impliedDepIata || "?";
   const arrAirport = f.arrival?.airport?.iata || impliedArrIata || "?";
-  const depAirportName = f.departure?.airport?.name || depAirport;
-  const arrAirportName = f.arrival?.airport?.name || arrAirport;
+  const depAirportName = f.departure?.airport?.name || AIRPORT_DB[depAirport]?.city || depAirport;
+  const arrAirportName = f.arrival?.airport?.name || AIRPORT_DB[arrAirport]?.city || arrAirport;
 
   // Use revised (actual) time if available, otherwise scheduled
   const depTime = (f.departure?.revisedTime?.local || f.departure?.scheduledTime?.local)?.slice(11, 16)
@@ -233,10 +234,11 @@ function buildDirectFlights(departures, arrivals, originIata, destIata) {
   const seen = new Set();
   const results = [];
 
-  // From arrivals at destination: implied depAirport = origin
+  // From arrivals at destination: MUST have come from origin
   arrivals.forEach(f => {
     const depIata = f.departure?.airport?.iata;
-    if (originIata && depIata && depIata !== originIata) return;
+    // Strict filter — only include if departure airport matches origin
+    if (!depIata || depIata !== originIata) return;
     const mapped = mapFlight(f, originIata, destIata);
     if (!seen.has(mapped.flightNum)) {
       seen.add(mapped.flightNum);
@@ -244,10 +246,11 @@ function buildDirectFlights(departures, arrivals, originIata, destIata) {
     }
   });
 
-  // From departures at origin: implied arrAirport = destination
+  // From departures at origin: MUST be going to destination
   departures.forEach(f => {
     const arrIata = f.arrival?.airport?.iata;
-    if (destIata && arrIata && arrIata !== destIata) return;
+    // Strict filter — only include if arrival airport matches destination
+    if (!arrIata || arrIata !== destIata) return;
     const mapped = mapFlight(f, originIata, destIata);
     if (!seen.has(mapped.flightNum)) {
       seen.add(mapped.flightNum);
@@ -447,8 +450,8 @@ app.get("/api/test", async (req, res) => {
   if (!ap) return res.status(400).json({ error: `Airport not found: ${airport}` });
 
   const now = new Date();
-  const from = new Date(now.getTime() - 6 * 60 * 60 * 1000);
-  const to = new Date(now.getTime() + 6 * 60 * 60 * 1000);
+  const from = new Date(now.getTime() - 11 * 60 * 60 * 1000);
+  const to = new Date(now.getTime() + 1 * 60 * 60 * 1000);
   const fmt = d => d.toISOString().slice(0, 16);
   const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${ap.icao}/${fmt(from)}/${fmt(to)}`;
 
