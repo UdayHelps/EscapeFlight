@@ -224,7 +224,7 @@ export default function App() {
           <div style={{textAlign:"center",padding:"80px 20px"}}>
             <div style={{fontSize:11,color:"#64748b",letterSpacing:"3px",marginBottom:20}}>FETCHING LIVE FLIGHT DATA<span className="blink">_</span></div>
             <div style={{width:40,height:40,border:"3px solid #1e293b",borderTop:"3px solid #f97316",borderRadius:"50%",margin:"0 auto",animation:"spin 0.8s linear infinite"}}/>
-            <div style={{marginTop:16,fontSize:11,color:"#334155"}}>Querying OpenSky Network — may take 20–40 seconds for fresh data</div>
+            <div style={{marginTop:16,fontSize:11,color:"#334155"}}>Querying AeroDataBox — fetching real flight data...</div>
           </div>
         )}
 
@@ -232,7 +232,7 @@ export default function App() {
           <div className="fade-in">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:8}}>
               <div style={{fontSize:11,color:"#64748b"}}>{result.origin?.city} → {result.destination?.city} · Last 24h real flight data</div>
-              <span style={{fontSize:10,color:"#4ade80",border:"1px solid #4ade8044",borderRadius:4,padding:"2px 8px"}}>◉ OPENSKY NETWORK LIVE</span>
+              <span style={{fontSize:10,color:"#4ade80",border:"1px solid #4ade8044",borderRadius:4,padding:"2px 8px"}}>◉ AERODATABOX LIVE</span>
             </div>
 
             <div className="mg" style={{display:"grid",gridTemplateColumns:"clamp(280px,30%,360px) 1fr",gap:20}}>
@@ -315,8 +315,8 @@ export default function App() {
                       </div>
                       {selectedRoute.flights.length===0?(
                         <div style={{padding:40,textAlign:"center",color:"#64748b",fontSize:12,lineHeight:2}}>
-                          No flight data returned from OpenSky for this route.<br/>
-                          This can happen on low-traffic routes or during OpenSky's quiet periods.<br/>
+                          No flight data returned for this route in the current time window.<br/>
+                          This can happen on low-traffic routes or outside peak hours.<br/>
                           <span style={{color:"#f97316"}}>Try a busier route or check back in a few minutes.</span>
                         </div>
                       ):(
@@ -428,13 +428,13 @@ export default function App() {
           <div style={{textAlign:"center",padding:"80px 20px",color:"#475569"}}>
             <div style={{fontSize:60,marginBottom:16,opacity:.3}}>✈</div>
             <div style={{fontSize:13,letterSpacing:"3px"}}>ENTER ANY ROUTE TO BEGIN</div>
-            <div style={{fontSize:11,marginTop:8}}>Real ADS-B data · 6,000+ airports · Powered by OpenSky Network</div>
+            <div style={{fontSize:11,marginTop:8}}>Real flight data · 6,000+ airports · Powered by AeroDataBox</div>
           </div>
         )}
 
         <div style={{marginTop:40,padding:"20px 0",borderTop:"1px solid #1e293b",display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:8,fontSize:10,color:"#334155"}}>
           <span>ESCAPEROUTE FLIGHT INTELLIGENCE © 2026</span>
-          <span>POWERED BY: OpenSky Network</span>
+          <span>POWERED BY: AeroDataBox via RapidAPI</span>
           <span>FOR INFORMATIONAL USE ONLY</span>
         </div>
       </div>
