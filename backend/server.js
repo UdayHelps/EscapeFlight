@@ -19,7 +19,7 @@ function getCached(key) {
 }
 function setCache(key, data) { cache.set(key, { data, ts: Date.now() }); }
 
-// ── Airport DB ────────────────────────────────────────────────────────
+// ── Airport DB — loaded from OurAirports CSV (9000+ airports) ─────────
 let AIRPORT_DB = {};
 let DB_LOADED = false;
 
@@ -47,9 +47,9 @@ async function loadAirportDB() {
       }
     }
     DB_LOADED = true;
-    console.log(`Airport DB: ${Object.keys(AIRPORT_DB).length} airports`);
+    console.log(`Airport DB loaded: ${Object.keys(AIRPORT_DB).length} airports`);
   } catch (e) {
-    console.error("CSV failed, using fallback:", e.message);
+    console.error("CSV failed:", e.message);
     loadFallbackAirports();
   }
 }
@@ -136,31 +136,29 @@ function loadFallbackAirports() {
   console.log(`Fallback DB: ${Object.keys(AIRPORT_DB).length} airports`);
 }
 
-// ── AeroDataBox: fetch flights for an airport ─────────────────────────
+// ── AeroDataBox: fetch flights — all data comes from API, no hardcoding ─
 async function fetchFlights(iataCode, direction) {
   const cacheKey = `${iataCode}-${direction}`;
   const cached = getCached(cacheKey);
   if (cached) { console.log(`[Cache] ${iataCode} ${direction}`); return cached; }
 
-  // Use ICAO code — look it up from airport DB
   const ap = AIRPORT_DB[iataCode];
-  const icao = ap?.icao || iataCode;
+  const icao = ap?.icao;
+  if (!icao) { console.error(`No ICAO for ${iataCode}`); return []; }
 
-  // Time window: last 12h to next 12h
   const now = new Date();
   const from = new Date(now.getTime() - 12 * 60 * 60 * 1000);
   const to = new Date(now.getTime() + 12 * 60 * 60 * 1000);
   const fmt = d => d.toISOString().slice(0, 16);
 
-  // AeroDataBox correct endpoint format
   const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmt(from)}/${fmt(to)}`;
 
   try {
-    console.log(`[AeroDataBox] ${direction} for ${iataCode} (${icao})...`);
+    console.log(`[AeroDataBox] ${direction} ${iataCode} (${icao})...`);
     const resp = await axios.get(url, {
       params: {
         withLeg: "true",
-        direction: direction,   // "Arrival" or "Departure"
+        direction,
         withCancelled: "true",
         withCodeshared: "false",
         withCargo: "false",
@@ -178,132 +176,123 @@ async function fetchFlights(iataCode, direction) {
     setCache(cacheKey, flights);
     return flights;
   } catch (e) {
-    console.error(`[AeroDataBox] ${iataCode} ${direction} failed:`, e.response?.status, e.response?.data || e.message);
+    console.error(`[AeroDataBox] ${iataCode} ${direction} failed:`, e.response?.status, JSON.stringify(e.response?.data)?.slice(0, 200) || e.message);
     return [];
   }
 }
 
-// ── Map AeroDataBox status to our status ──────────────────────────────
+// ── Map flight from AeroDataBox response — use API data directly ───────
+function mapFlight(f) {
+  // AeroDataBox gives us everything — airline name, airport names, status
+  // No need for any lookup tables
+  const flightNum = f.number || f.callSign || "N/A";
+  const airlineName = f.airline?.name || "Unknown Airline";
+  const airlineCode = f.airline?.iata || f.airline?.icao || flightNum.slice(0, 2);
+
+  const depAirport = f.departure?.airport?.iata || f.departure?.airport?.icao || "?";
+  const arrAirport = f.arrival?.airport?.iata || f.arrival?.airport?.icao || "?";
+  const depAirportName = f.departure?.airport?.name || depAirport;
+  const arrAirportName = f.arrival?.airport?.name || arrAirport;
+
+  const depTime = f.departure?.scheduledTime?.local?.slice(11, 16)
+    || f.departure?.scheduledTime?.utc?.slice(11, 16) || "--:--";
+  const arrTime = f.arrival?.scheduledTime?.local?.slice(11, 16)
+    || f.arrival?.scheduledTime?.utc?.slice(11, 16) || "--:--";
+
+  const status = mapStatus(f.status);
+
+  return {
+    flightNum,
+    airlineCode,
+    airlineName,
+    depTime,
+    arrTime,
+    depAirport,
+    arrAirport,
+    depAirportName,
+    arrAirportName,
+    status,
+    aircraft: f.aircraft?.model || null,
+    terminal: f.arrival?.terminal || f.departure?.terminal || null,
+    gate: f.arrival?.gate || f.departure?.gate || null,
+  };
+}
+
 function mapStatus(raw) {
   if (!raw) return "SCHEDULED";
   const s = raw.toLowerCase();
   if (s.includes("landed") || s.includes("arrived")) return "LANDED";
   if (s.includes("cancel")) return "CANCELLED";
-  if (s.includes("airborne") || s.includes("departed") || s.includes("en route")) return "IN_AIR";
+  if (s.includes("airborne") || s.includes("departed") || s.includes("en route") || s.includes("enroute")) return "IN_AIR";
   if (s.includes("delay")) return "DELAYED";
   if (s.includes("diverted")) return "DIVERTED";
+  if (s.includes("boarding") || s.includes("gate")) return "BOARDING";
   return "SCHEDULED";
 }
 
-// ── Build unified flight list from AeroDataBox arrivals ───────────────
-function buildFlightsFromArrivals(arrivals, originIata) {
-  return arrivals
-    .filter(f => {
-      // Only keep flights that came from our origin airport
-      const depIata = f.departure?.airport?.iata;
-      return !originIata || !depIata || depIata === originIata;
-    })
-    .map(f => {
-      const flightNum = f.number || f.callSign || "N/A";
-      const airlineCode = flightNum.replace(/[0-9]/g, "").slice(0, 2).toUpperCase();
-      return {
-        flightNum,
-        airline: airlineCode,
-        airlineName: f.airline?.name || AIRLINE_NAMES[airlineCode] || airlineCode,
-        depTime: f.departure?.scheduledTime?.local?.slice(11, 16) || "--:--",
-        arrTime: f.arrival?.scheduledTime?.local?.slice(11, 16) || "--:--",
-        depAirport: f.departure?.airport?.iata || "?",
-        arrAirport: f.arrival?.airport?.iata || "?",
-        status: mapStatus(f.status),
-        terminal: f.arrival?.terminal || "",
-        gate: f.arrival?.gate || "",
-      };
-    });
-}
-
-function buildFlightsFromDepartures(departures, destIata) {
-  return departures
-    .filter(f => {
-      const arrIata = f.arrival?.airport?.iata;
-      return !destIata || !arrIata || arrIata === destIata;
-    })
-    .map(f => {
-      const flightNum = f.number || f.callSign || "N/A";
-      const airlineCode = flightNum.replace(/[0-9]/g, "").slice(0, 2).toUpperCase();
-      return {
-        flightNum,
-        airline: airlineCode,
-        airlineName: f.airline?.name || AIRLINE_NAMES[airlineCode] || airlineCode,
-        depTime: f.departure?.scheduledTime?.local?.slice(11, 16) || "--:--",
-        arrTime: f.arrival?.scheduledTime?.local?.slice(11, 16) || "--:--",
-        depAirport: f.departure?.airport?.iata || "?",
-        arrAirport: f.arrival?.airport?.iata || "?",
-        status: mapStatus(f.status),
-      };
-    });
-}
-
-// ── Merge arrivals + departures, dedupe by flight number ──────────────
-function mergeFlights(arrivals, departures) {
+// ── Filter and build flights between two specific airports ─────────────
+function buildDirectFlights(departures, arrivals, originIata, destIata) {
   const seen = new Set();
-  const all = [];
-  [...arrivals, ...departures].forEach(f => {
-    if (!seen.has(f.flightNum)) { seen.add(f.flightNum); all.push(f); }
+  const results = [];
+
+  // From arrivals: flights that came from origin
+  arrivals.forEach(f => {
+    const depIata = f.departure?.airport?.iata;
+    if (originIata && depIata && depIata !== originIata) return;
+    const mapped = mapFlight(f);
+    if (!seen.has(mapped.flightNum)) {
+      seen.add(mapped.flightNum);
+      results.push(mapped);
+    }
   });
-  return all.sort((a, b) => a.depTime.localeCompare(b.depTime));
+
+  // From departures: flights going to destination
+  departures.forEach(f => {
+    const arrIata = f.arrival?.airport?.iata;
+    if (destIata && arrIata && arrIata !== destIata) return;
+    const mapped = mapFlight(f);
+    if (!seen.has(mapped.flightNum)) {
+      seen.add(mapped.flightNum);
+      results.push(mapped);
+    }
+  });
+
+  return results.sort((a, b) => a.depTime.localeCompare(b.depTime));
 }
 
 function calcReliability(flights) {
   const landed = flights.filter(f => f.status === "LANDED").length;
   const inAir = flights.filter(f => f.status === "IN_AIR").length;
   const cancelled = flights.filter(f => f.status === "CANCELLED").length;
-  const scheduled = flights.filter(f => f.status === "SCHEDULED").length;
   const delayed = flights.filter(f => f.status === "DELAYED").length;
-  const total = landed + inAir + cancelled + delayed;
+  const scheduled = flights.filter(f => ["SCHEDULED","BOARDING"].includes(f.status)).length;
+  const operated = landed + inAir + delayed;
+  const total = operated + cancelled;
   return {
-    successRate: total > 0 ? Math.round(((landed + inAir) / total) * 100) : 0,
-    landed, inAir, cancelled, scheduled, delayed, total,
+    successRate: total > 0 ? Math.round((operated / total) * 100) : 0,
+    landed, inAir, cancelled, delayed, scheduled, total,
   };
 }
 
+// Airline stats — built entirely from live API data, no hardcoded names
 function calcAirlineStats(flights) {
   const map = {};
   flights.forEach(f => {
-    const k = f.airlineName || f.airline;
-    if (!map[k]) map[k] = { name: k, code: f.airline, total: 0, landed: 0, inAir: 0, cancelled: 0 };
+    const k = f.airlineName;
+    if (!map[k]) map[k] = { name: k, code: f.airlineCode, total: 0, landed: 0, inAir: 0, cancelled: 0, delayed: 0 };
     map[k].total++;
     if (f.status === "LANDED") map[k].landed++;
     if (f.status === "IN_AIR") map[k].inAir++;
     if (f.status === "CANCELLED") map[k].cancelled++;
+    if (f.status === "DELAYED") map[k].delayed++;
   });
   return Object.values(map)
-    .map(a => ({ ...a, rate: a.total > 0 ? Math.round(((a.landed + a.inAir) / a.total) * 100) : 0 }))
+    .map(a => ({
+      ...a,
+      rate: a.total > 0 ? Math.round(((a.landed + a.inAir) / a.total) * 100) : 0,
+    }))
     .sort((a, b) => b.rate - a.rate);
 }
-
-const AIRLINE_NAMES = {
-  EK:"Emirates",QR:"Qatar Airways",EY:"Etihad Airways",AI:"Air India",
-  "6E":"IndiGo",UK:"Vistara",SG:"SpiceJet",IX:"Air India Express",
-  LH:"Lufthansa",BA:"British Airways",AF:"Air France",KL:"KLM",
-  TK:"Turkish Airlines",SQ:"Singapore Airlines",MH:"Malaysia Airlines",
-  CX:"Cathay Pacific",NH:"ANA",JL:"Japan Airlines",OZ:"Asiana Airlines",
-  KE:"Korean Air",CA:"Air China",CZ:"China Southern",MU:"China Eastern",
-  QF:"Qantas",VA:"Virgin Australia",NZ:"Air New Zealand",
-  AA:"American Airlines",UA:"United Airlines",DL:"Delta Air Lines",
-  WN:"Southwest Airlines",B6:"JetBlue",AS:"Alaska Airlines",
-  ET:"Ethiopian Airlines",MS:"EgyptAir",KQ:"Kenya Airways",
-  RJ:"Royal Jordanian",GF:"Gulf Air",WY:"Oman Air",
-  FZ:"flydubai",G9:"Air Arabia",SV:"Saudia",IR:"Iran Air",
-  PK:"Pakistan International",TG:"Thai Airways",VN:"Vietnam Airlines",
-  GA:"Garuda Indonesia",PR:"Philippine Airlines",
-  LA:"LATAM Airlines",AV:"Avianca",CM:"Copa Airlines",
-  AM:"Aeromexico",AC:"Air Canada",WS:"WestJet",
-  IB:"Iberia",VY:"Vueling",FR:"Ryanair",U2:"easyJet",
-  W6:"Wizz Air",OS:"Austrian Airlines",LX:"SWISS",SK:"SAS",
-  AY:"Finnair",DY:"Norwegian",PC:"Pegasus Airlines",
-  TP:"TAP Air Portugal",A3:"Aegean Airlines",
-  SU:"Aeroflot",S7:"S7 Airlines",KC:"Air Astana",HY:"Uzbekistan Airways",
-};
 
 const MAJOR_HUBS = [
   "DXB","DOH","AUH","IST","LHR","CDG","FRA","AMS","ZRH","VIE","MAD","FCO",
@@ -372,30 +361,38 @@ app.get("/api/routes", async (req, res) => {
   if (!dAp) return res.status(400).json({ error: `Airport not found: ${d}` });
   if (o === d) return res.status(400).json({ error: "Origin and destination must differ" });
 
-  const result = { origin: oAp, destination: dAp, routes: [], dataSource: "aerodatabox", errors: [] };
+  const result = {
+    origin: oAp,
+    destination: dAp,
+    routes: [],
+    dataSource: "aerodatabox",
+    errors: [],
+  };
 
-  // ── Direct route ──────────────────────────────────────────────────
-  console.log(`\n=== ${o} → ${d} ===`);
-  const [destArrivals, origDepartures] = await Promise.all([
-    fetchFlights(d, "Arrival"),
+  console.log(`\n=== Route: ${o} → ${d} ===`);
+
+  // Fetch origin departures + destination arrivals in parallel
+  const [origDepartures, destArrivals] = await Promise.all([
     fetchFlights(o, "Departure"),
+    fetchFlights(d, "Arrival"),
   ]);
 
-  const arrFiltered = buildFlightsFromArrivals(destArrivals, o);
-  const depFiltered = buildFlightsFromDepartures(origDepartures, d);
-  const directFlights = mergeFlights(arrFiltered, depFiltered);
+  // Direct route
+  const directFlights = buildDirectFlights(origDepartures, destArrivals, o, d);
   const ds = calcReliability(directFlights);
-  console.log(`Direct: ${directFlights.length} flights, ${ds.successRate}% success`);
+  console.log(`Direct: ${directFlights.length} flights, ${ds.successRate}% success rate`);
 
   result.routes.push({
-    id: "direct", path: [o, d],
+    id: "direct",
+    path: [o, d],
     label: `${oAp.city} → ${dAp.city}`,
-    ...ds, flights: directFlights,
+    ...ds,
+    flights: directFlights,
     airlineStats: calcAirlineStats(directFlights),
     isAlternate: false,
   });
 
-  // ── Alternate routes via hubs ─────────────────────────────────────
+  // Alternate via hubs — reuse already-fetched data where possible
   const vias = findViaHubs(o, d, 2);
   for (const via of vias) {
     const vAp = AIRPORT_DB[via];
@@ -406,35 +403,36 @@ app.get("/api/routes", async (req, res) => {
         fetchFlights(via, "Departure"),
       ]);
 
-      const leg1arr = buildFlightsFromArrivals(viaArrivals, o);
-      const leg1dep = buildFlightsFromDepartures(origDepartures, via);
-      const leg1 = mergeFlights(leg1arr, leg1dep);
-
-      const leg2arr = buildFlightsFromArrivals(destArrivals, via);
-      const leg2dep = buildFlightsFromDepartures(viaDepartures, d);
-      const leg2 = mergeFlights(leg2arr, leg2dep);
-
+      const leg1 = buildDirectFlights(origDepartures, viaArrivals, o, via);
+      const leg2 = buildDirectFlights(viaDepartures, destArrivals, via, d);
       const s1 = calcReliability(leg1);
       const s2 = calcReliability(leg2);
       const combinedRate = Math.round((s1.successRate / 100) * (s2.successRate / 100) * 100);
 
-      console.log(`Via ${via}: ${s1.successRate}% + ${s2.successRate}% = ${combinedRate}%`);
+      console.log(`Via ${via}: ${s1.successRate}% × ${s2.successRate}% = ${combinedRate}%`);
 
       result.routes.push({
-        id: via, path: [o, via, d],
+        id: via,
+        path: [o, via, d],
         label: `${oAp.city} → ${vAp.city} → ${dAp.city}`,
         successRate: combinedRate,
         landed: Math.min(s1.landed, s2.landed),
         cancelled: Math.max(s1.cancelled, s2.cancelled),
         inAir: Math.min(s1.inAir, s2.inAir),
+        delayed: Math.min(s1.delayed, s2.delayed),
         scheduled: Math.min(s1.scheduled, s2.scheduled),
         total: Math.min(s1.total, s2.total),
         flights: [...leg1, ...leg2],
         airlineStats: calcAirlineStats([...leg1, ...leg2]),
-        isAlternate: true, via: vAp.city, viaCode: via,
+        isAlternate: true,
+        via: vAp.city,
+        viaCode: via,
+        leg1Stats: s1,
+        leg2Stats: s2,
       });
     } catch (e) {
       console.error(`Via ${via} failed:`, e.message);
+      result.errors.push(`Via ${via}: ${e.message}`);
     }
   }
 
@@ -442,22 +440,11 @@ app.get("/api/routes", async (req, res) => {
   res.json(result);
 });
 
-// ── /api/health ───────────────────────────────────────────────────────
-app.get("/api/health", async (req, res) => {
-  await loadAirportDB();
-  res.json({
-    status: "ok",
-    airportsLoaded: Object.keys(AIRPORT_DB).length,
-    apiKey: RAPIDAPI_KEY ? "set" : "NOT SET — add RAPIDAPI_KEY to env vars",
-    dataSource: "aerodatabox",
-    time: new Date().toISOString(),
-  });
-});
-
-// ── /api/test — test AeroDataBox directly ────────────────────────────
+// ── /api/test — debug AeroDataBox response ────────────────────────────
 app.get("/api/test", async (req, res) => {
   await loadAirportDB();
-  const airport = req.query.airport || "DXB";
+  const airport = (req.query.airport || "DXB").toUpperCase();
+  const direction = req.query.direction || "Departure";
   const ap = AIRPORT_DB[airport];
   if (!ap) return res.status(400).json({ error: `Airport not found: ${airport}` });
 
@@ -469,27 +456,43 @@ app.get("/api/test", async (req, res) => {
 
   try {
     const resp = await axios.get(url, {
-      params: { withLeg: "true", direction: "Departure", withCancelled: "true", withCodeshared: "false", withCargo: "false", withPrivate: "false" },
+      params: { withLeg: "true", direction, withCancelled: "true", withCodeshared: "false", withCargo: "false", withPrivate: "false" },
       headers: { "x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST },
       timeout: 15000,
     });
+    const flights = resp.data?.arrivals || resp.data?.departures || [];
     res.json({
-      url,
-      icao: ap.icao,
-      status: resp.status,
-      keys: Object.keys(resp.data || {}),
-      departureCount: resp.data?.departures?.length || 0,
-      arrivalCount: resp.data?.arrivals?.length || 0,
-      sample: resp.data?.departures?.[0] || resp.data?.arrivals?.[0] || null,
+      airport, icao: ap.icao, direction, url,
+      totalFlights: flights.length,
+      sample: flights.slice(0, 2).map(mapFlight),
+      rawSample: flights[0] || null,
     });
   } catch (e) {
-    res.json({ error: e.message, status: e.response?.status, data: e.response?.data, url });
+    res.json({
+      error: e.message,
+      status: e.response?.status,
+      data: e.response?.data,
+      url,
+    });
   }
+});
+
+// ── /api/health ───────────────────────────────────────────────────────
+app.get("/api/health", async (req, res) => {
+  await loadAirportDB();
+  res.json({
+    status: "ok",
+    airportsLoaded: Object.keys(AIRPORT_DB).length,
+    apiKey: RAPIDAPI_KEY ? "set" : "NOT SET",
+    dataSource: "aerodatabox",
+    note: "All airline and airport names come directly from AeroDataBox API — no hardcoded lookup tables",
+    time: new Date().toISOString(),
+  });
 });
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
   console.log(`✈  Escape Route API on port ${PORT}`);
-  if (!RAPIDAPI_KEY) console.warn("⚠ RAPIDAPI_KEY not set!");
+  if (!RAPIDAPI_KEY) console.warn("⚠  RAPIDAPI_KEY not set!");
   await loadAirportDB();
 });
