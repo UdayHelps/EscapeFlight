@@ -7,20 +7,28 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ── Cache to avoid hammering OpenSky ─────────────────────────────────
+const cache = new Map();
+function getCached(key) {
+  const entry = cache.get(key);
+  if (entry && Date.now() - entry.ts < 10 * 60 * 1000) return entry.data; // 10 min cache
+  return null;
+}
+function setCache(key, data) { cache.set(key, { data, ts: Date.now() }); }
+
 function osAuth() {
   if (process.env.OPENSKY_USER && process.env.OPENSKY_PASS)
     return { username: process.env.OPENSKY_USER, password: process.env.OPENSKY_PASS };
   return undefined;
 }
 
-// ── Global airport database ───────────────────────────────────────────
+// ── Airport DB ────────────────────────────────────────────────────────
 let AIRPORT_DB = {};
 let DB_LOADED = false;
 
 async function loadAirportDB() {
   if (DB_LOADED) return;
   try {
-    console.log("Loading airport database...");
     const resp = await axios.get(
       "https://davidmegginson.github.io/ourairports-data/airports.csv",
       { timeout: 30000, responseType: "text" }
@@ -103,24 +111,26 @@ function loadFallbackAirports() {
     ["BAH","OBBI","Bahrain International","Manama","BH",26.2708,50.6336,"large_airport"],
     ["BKK","VTBS","Suvarnabhumi","Bangkok","TH",13.6811,100.7472,"large_airport"],
     ["KUL","WMKK","Kuala Lumpur International","Kuala Lumpur","MY",2.7456,101.7099,"large_airport"],
-    ["CGK","WIII","Soekarno-Hatta","Jakarta","ID",-6.1256,106.6559,"large_airport"],
-    ["MNL","RPLL","Ninoy Aquino International","Manila","PH",14.5086,121.0197,"large_airport"],
     ["ZRH","LSZH","Zurich Airport","Zurich","CH",47.4647,8.5492,"large_airport"],
     ["VIE","LOWW","Vienna International","Vienna","AT",48.1103,16.5697,"large_airport"],
     ["MAD","LEMD","Madrid Barajas","Madrid","ES",40.4936,-3.5668,"large_airport"],
-    ["BCN","LEBL","Barcelona El Prat","Barcelona","ES",41.2971,2.0785,"large_airport"],
     ["FCO","LIRF","Fiumicino","Rome","IT",41.8003,12.2389,"large_airport"],
     ["ATH","LGAV","Athens International","Athens","GR",37.9364,23.9445,"large_airport"],
     ["SVO","UUEE","Sheremetyevo","Moscow","RU",55.9726,37.4146,"large_airport"],
     ["CPT","FACT","Cape Town International","Cape Town","ZA",-33.9648,18.6017,"large_airport"],
     ["LOS","DNMM","Murtala Muhammed","Lagos","NG",6.5774,3.3212,"large_airport"],
-    ["ACC","DGAA","Kotoka International","Accra","GH",5.6052,-0.1668,"large_airport"],
     ["BOG","SKBO","El Dorado International","Bogota","CO",4.7016,-74.1469,"large_airport"],
     ["GYD","UBBB","Heydar Aliyev International","Baku","AZ",40.4675,50.0467,"large_airport"],
     ["EVN","UDYZ","Zvartnots International","Yerevan","AM",40.1473,44.3959,"large_airport"],
     ["TBS","UGTB","Tbilisi International","Tbilisi","GE",41.6692,44.9547,"large_airport"],
     ["BEY","OLBA","Beirut Rafic Hariri","Beirut","LB",33.8209,35.4884,"large_airport"],
-    ["DEL","VIDP","Indira Gandhi International","Delhi","IN",28.5562,77.1,"large_airport"],
+    ["CGK","WIII","Soekarno-Hatta","Jakarta","ID",-6.1256,106.6559,"large_airport"],
+    ["MNL","RPLL","Ninoy Aquino International","Manila","PH",14.5086,121.0197,"large_airport"],
+    ["BCN","LEBL","Barcelona El Prat","Barcelona","ES",41.2971,2.0785,"large_airport"],
+    ["ACC","DGAA","Kotoka International","Accra","GH",5.6052,-0.1668,"large_airport"],
+    ["MEL","YMML","Melbourne Airport","Melbourne","AU",-37.6733,144.8433,"large_airport"],
+    ["SCL","SCEL","Arturo Merino Benitez","Santiago","CL",-33.3928,-70.7856,"large_airport"],
+    ["LIM","SPJC","Jorge Chavez International","Lima","PE",-12.0219,-77.1143,"large_airport"],
   ];
   f.forEach(([iata,icao,name,city,country,lat,lon,type]) => {
     AIRPORT_DB[iata] = { iata, icao, name, lat, lon, city, country, type };
@@ -153,65 +163,64 @@ const AIRLINE_NAMES = {
   SU:"Aeroflot",S7:"S7 Airlines",KC:"Air Astana",HY:"Uzbekistan Airways",
 };
 
-// ── OpenSky fetch with retry ──────────────────────────────────────────
-async function getOpenSkyFlights(icaoCode, type = "arrivals", retries = 2) {
+// ── OpenSky fetch — one airport at a time, with cache ─────────────────
+async function fetchOpenSky(icaoCode, type) {
+  const cacheKey = `${icaoCode}-${type}-${Math.floor(Date.now() / (10*60*1000))}`;
+  const cached = getCached(cacheKey);
+  if (cached) { console.log(`[Cache hit] ${icaoCode} ${type}`); return cached; }
+
   const now = Math.floor(Date.now() / 1000);
   const begin = now - 86400;
 
-  // Try authenticated endpoint first, then anonymous
-  const endpoints = [
-    `https://opensky-network.org/api/flights/${type}`,
-  ];
-
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const resp = await axios.get(endpoints[0], {
+  try {
+    console.log(`[OpenSky] Fetching ${type} for ${icaoCode}...`);
+    const resp = await axios.get(
+      `https://opensky-network.org/api/flights/${type}`,
+      {
         params: { airport: icaoCode, begin, end: now },
         auth: osAuth(),
-        timeout: 30000,
-        headers: {
-          "Accept": "application/json",
-          "User-Agent": "EscapeRouteFinder/1.0",
-        },
-      });
-      const data = Array.isArray(resp.data) ? resp.data : [];
-      console.log(`[OpenSky] ${type} ${icaoCode}: ${data.length} flights`);
-      return data;
-    } catch (e) {
-      console.error(`[OpenSky] attempt ${attempt + 1} failed for ${icaoCode} ${type}: ${e.message}`);
-      if (attempt < retries) await sleep(2000);
-    }
+        timeout: 60000, // 60 second timeout
+        headers: { "Accept": "application/json", "User-Agent": "EscapeRouteFinder/1.0" },
+      }
+    );
+    const data = Array.isArray(resp.data) ? resp.data : [];
+    console.log(`[OpenSky] ${icaoCode} ${type}: ${data.length} records`);
+    setCache(cacheKey, data);
+    return data;
+  } catch (e) {
+    console.error(`[OpenSky] ${icaoCode} ${type} failed: ${e.message}`);
+    return [];
   }
-  return [];
 }
 
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function matchFlights(departures, arrivals) {
+function buildFlights(departures, arrivals) {
   const depMap = {};
-  departures.forEach((d) => { const cs = d.callsign?.trim(); if (cs) depMap[cs] = d; });
+  departures.forEach(d => { const cs = d.callsign?.trim(); if (cs) depMap[cs] = d; });
 
   const results = [];
   const seen = new Set();
 
-  arrivals.forEach((a) => {
+  // Matched: departed from origin AND arrived at destination
+  arrivals.forEach(a => {
     const cs = a.callsign?.trim();
     if (!cs || seen.has(cs)) return;
     seen.add(cs);
-    const dep = depMap[cs] || null;
+    const dep = depMap[cs];
     const twoLetter = cs.slice(0, 2).toUpperCase();
     results.push({
       flightNum: cs,
       airline: twoLetter,
       airlineName: AIRLINE_NAMES[twoLetter] || twoLetter,
-      depTime: dep?.firstSeen ? new Date(dep.firstSeen * 1000).toISOString().slice(11, 16) : "--:--",
-      arrTime: a.lastSeen ? new Date(a.lastSeen * 1000).toISOString().slice(11, 16) : "--:--",
+      depTime: dep?.firstSeen ? new Date(dep.firstSeen * 1000).toISOString().slice(11,16) : "--:--",
+      arrTime: a.lastSeen ? new Date(a.lastSeen * 1000).toISOString().slice(11,16) : "--:--",
       status: "LANDED",
-      source: "opensky",
     });
   });
 
-  departures.forEach((d) => {
+  // Departed but not yet arrived = IN_AIR
+  departures.forEach(d => {
     const cs = d.callsign?.trim();
     if (!cs || seen.has(cs)) return;
     seen.add(cs);
@@ -220,10 +229,9 @@ function matchFlights(departures, arrivals) {
       flightNum: cs,
       airline: twoLetter,
       airlineName: AIRLINE_NAMES[twoLetter] || twoLetter,
-      depTime: d.firstSeen ? new Date(d.firstSeen * 1000).toISOString().slice(11, 16) : "--:--",
+      depTime: d.firstSeen ? new Date(d.firstSeen * 1000).toISOString().slice(11,16) : "--:--",
       arrTime: "--:--",
       status: "IN_AIR",
-      source: "opensky",
     });
   });
 
@@ -231,198 +239,163 @@ function matchFlights(departures, arrivals) {
 }
 
 function calcReliability(flights) {
-  const landed = flights.filter((f) => f.status === "LANDED").length;
-  const cancelled = flights.filter((f) => f.status === "CANCELLED").length;
-  const inAir = flights.filter((f) => f.status === "IN_AIR").length;
-  const scheduled = flights.filter((f) => f.status === "SCHEDULED").length;
-  const total = landed + cancelled + inAir;
-  return {
-    successRate: total > 0 ? Math.round(((landed + inAir) / total) * 100) : 0,
-    landed, cancelled, scheduled, inAir, total,
-  };
+  const landed = flights.filter(f => f.status === "LANDED").length;
+  const inAir = flights.filter(f => f.status === "IN_AIR").length;
+  const cancelled = flights.filter(f => f.status === "CANCELLED").length;
+  const scheduled = flights.filter(f => f.status === "SCHEDULED").length;
+  const total = landed + inAir + cancelled;
+  return { successRate: total > 0 ? Math.round(((landed+inAir)/total)*100) : 0, landed, inAir, cancelled, scheduled, total };
 }
 
 function calcAirlineStats(flights) {
   const map = {};
-  flights.forEach((f) => {
+  flights.forEach(f => {
     const k = f.airlineName || f.airline;
-    if (!map[k]) map[k] = { name: k, code: f.airline, total: 0, landed: 0, inAir: 0, cancelled: 0 };
+    if (!map[k]) map[k] = { name:k, code:f.airline, total:0, landed:0, inAir:0, cancelled:0 };
     map[k].total++;
-    if (f.status === "LANDED") map[k].landed++;
-    if (f.status === "IN_AIR") map[k].inAir++;
-    if (f.status === "CANCELLED") map[k].cancelled++;
+    if (f.status==="LANDED") map[k].landed++;
+    if (f.status==="IN_AIR") map[k].inAir++;
+    if (f.status==="CANCELLED") map[k].cancelled++;
   });
   return Object.values(map)
-    .map((a) => ({ ...a, rate: a.total > 0 ? Math.round(((a.landed + a.inAir) / a.total) * 100) : 0 }))
-    .sort((a, b) => b.rate - a.rate);
+    .map(a => ({ ...a, rate: a.total>0 ? Math.round(((a.landed+a.inAir)/a.total)*100) : 0 }))
+    .sort((a,b) => b.rate - a.rate);
 }
 
 const MAJOR_HUBS = [
   "DXB","DOH","AUH","IST","LHR","CDG","FRA","AMS","ZRH","VIE","MAD","FCO",
-  "SIN","HKG","BKK","KUL","NRT","ICN","PEK","PVG","CGK","DEL",
-  "JFK","LAX","ORD","MIA","ATL",
-  "SYD","MEL","AKL",
-  "CAI","ADD","JNB","NBO","LOS","ACC",
+  "SIN","HKG","BKK","KUL","NRT","ICN","PEK","PVG","DEL",
+  "JFK","LAX","ORD","MIA",
+  "SYD","MEL","CAI","ADD","JNB","NBO",
   "GRU","EZE","BOG","MEX",
-  "RUH","KWI","BAH","MCT","JED",
-  "SVO","YYZ","GYD",
+  "RUH","KWI","BAH","MCT","JED","SVO","YYZ","GYD",
 ];
 
-function findViaHubs(o, d) {
+function findViaHubs(o, d, max=2) {
   const oAp = AIRPORT_DB[o], dAp = AIRPORT_DB[d];
   if (!oAp || !dAp) return [];
-  const distOD = Math.hypot(dAp.lat - oAp.lat, dAp.lon - oAp.lon);
+  const distOD = Math.hypot(dAp.lat-oAp.lat, dAp.lon-oAp.lon);
   return MAJOR_HUBS
-    .filter((h) => h !== o && h !== d && AIRPORT_DB[h])
-    .map((h) => {
+    .filter(h => h!==o && h!==d && AIRPORT_DB[h])
+    .map(h => {
       const hub = AIRPORT_DB[h];
-      const distOH = Math.hypot(hub.lat - oAp.lat, hub.lon - oAp.lon);
-      const distHD = Math.hypot(dAp.lat - hub.lat, dAp.lon - hub.lon);
-      return { code: h, detour: (distOH + distHD) / Math.max(distOD, 0.01) };
+      const dOH = Math.hypot(hub.lat-oAp.lat, hub.lon-oAp.lon);
+      const dHD = Math.hypot(dAp.lat-hub.lat, dAp.lon-hub.lon);
+      return { code:h, detour:(dOH+dHD)/Math.max(distOD,0.01) };
     })
-    .filter((h) => h.detour < 1.9)
-    .sort((a, b) => a.detour - b.detour)
-    .slice(0, 3)
-    .map((h) => h.code);
+    .filter(h => h.detour < 1.8)
+    .sort((a,b) => a.detour-b.detour)
+    .slice(0, max)
+    .map(h => h.code);
 }
 
-// ── Test OpenSky connectivity on startup ──────────────────────────────
-async function testOpenSky() {
-  try {
-    const now = Math.floor(Date.now() / 1000);
-    const resp = await axios.get("https://opensky-network.org/api/flights/arrivals", {
-      params: { airport: "OMDB", begin: now - 3600, end: now },
-      auth: osAuth(),
-      timeout: 30000,
-    });
-    console.log(`✅ OpenSky test OK — got ${Array.isArray(resp.data) ? resp.data.length : 0} flights for OMDB`);
-    return true;
-  } catch (e) {
-    console.error("❌ OpenSky test failed:", e.message);
-    return false;
-  }
-}
-
-// ── Routes ────────────────────────────────────────────────────────────
+// ── /api/airports ─────────────────────────────────────────────────────
 app.get("/api/airports", async (req, res) => {
   await loadAirportDB();
-  const q = (req.query.q || "").toUpperCase().trim();
+  const q = (req.query.q||"").toUpperCase().trim();
   if (!q || q.length < 2) return res.json([]);
   const results = Object.values(AIRPORT_DB)
-    .filter((ap) =>
+    .filter(ap =>
       ap.iata?.includes(q) ||
       ap.city?.toUpperCase().includes(q) ||
       ap.name?.toUpperCase().includes(q) ||
       ap.country?.toUpperCase().includes(q)
     )
-    .sort((a, b) => {
-      if (a.iata === q) return -1;
-      if (b.iata === q) return 1;
-      if (a.type === "large_airport" && b.type !== "large_airport") return -1;
-      if (b.type === "large_airport" && a.type !== "large_airport") return 1;
+    .sort((a,b) => {
+      if (a.iata===q) return -1;
+      if (b.iata===q) return 1;
+      if (a.type==="large_airport"&&b.type!=="large_airport") return -1;
+      if (b.type==="large_airport"&&a.type!=="large_airport") return 1;
       return 0;
     })
-    .slice(0, 12)
-    .map((ap) => ({ code: ap.iata, icao: ap.icao, city: ap.city, country: ap.country, name: ap.name }));
+    .slice(0,12)
+    .map(ap => ({ code:ap.iata, icao:ap.icao, city:ap.city, country:ap.country, name:ap.name }));
   res.json(results);
 });
 
+// ── /api/routes — main endpoint ───────────────────────────────────────
 app.get("/api/routes", async (req, res) => {
   await loadAirportDB();
   const { origin, destination } = req.query;
-  if (!origin || !destination)
-    return res.status(400).json({ error: "origin and destination required" });
+  if (!origin||!destination) return res.status(400).json({ error:"origin and destination required" });
 
   const o = origin.trim().toUpperCase();
   const d = destination.trim().toUpperCase();
   const oAp = AIRPORT_DB[o];
   const dAp = AIRPORT_DB[d];
 
-  if (!oAp) return res.status(400).json({ error: `Airport not found: ${o}` });
-  if (!dAp) return res.status(400).json({ error: `Airport not found: ${d}` });
-  if (o === d) return res.status(400).json({ error: "Origin and destination must differ" });
+  if (!oAp) return res.status(400).json({ error:`Airport not found: ${o}` });
+  if (!dAp) return res.status(400).json({ error:`Airport not found: ${d}` });
+  if (o===d) return res.status(400).json({ error:"Origin and destination must differ" });
 
-  const result = { origin: oAp, destination: dAp, routes: [], dataSource: "opensky", errors: [] };
+  const result = { origin:oAp, destination:dAp, routes:[], dataSource:"opensky", errors:[] };
 
-  // Fetch direct route — run arrivals and departures in parallel
-  let directFlights = [];
-  try {
-    console.log(`Fetching direct: ${o}(${oAp.icao}) → ${d}(${dAp.icao})`);
-    const [arrivals, departures] = await Promise.all([
-      getOpenSkyFlights(dAp.icao, "arrivals"),
-      getOpenSkyFlights(oAp.icao, "departures"),
-    ]);
-    console.log(`Raw: ${arrivals.length} arrivals at ${d}, ${departures.length} departures from ${o}`);
-    directFlights = matchFlights(departures, arrivals);
-    console.log(`Matched: ${directFlights.length} flights for ${o}→${d}`);
-  } catch (e) {
-    result.errors.push(`Direct: ${e.message}`);
-  }
+  // ── Direct route: fetch arrivals at dest + departures from origin ──
+  console.log(`\n=== Route: ${o} → ${d} ===`);
+  const [destArrivals, origDepartures] = await Promise.all([
+    fetchOpenSky(dAp.icao, "arrivals"),
+    fetchOpenSky(oAp.icao, "departures"),
+  ]);
 
+  const directFlights = buildFlights(origDepartures, destArrivals);
   const ds = calcReliability(directFlights);
+  console.log(`Direct: ${directFlights.length} flights, ${ds.successRate}% success`);
+
   result.routes.push({
-    id: "direct", path: [o, d],
-    label: `${oAp.city} → ${dAp.city}`,
-    ...ds, flights: directFlights,
-    airlineStats: calcAirlineStats(directFlights),
-    isAlternate: false,
+    id:"direct", path:[o,d],
+    label:`${oAp.city} → ${dAp.city}`,
+    ...ds, flights:directFlights,
+    airlineStats:calcAirlineStats(directFlights),
+    isAlternate:false,
   });
 
-  // Fetch alternate routes (sequential to avoid rate limiting)
-  const vias = findViaHubs(o, d);
+  // ── Alternate routes via hubs (max 2, sequential with delay) ─────
+  const vias = findViaHubs(o, d, 2);
   for (const via of vias) {
+    await sleep(500); // small delay between hub requests
     const vAp = AIRPORT_DB[via];
-    if (!vAp) continue;
-    try {
-      await sleep(1000); // be nice to OpenSky
-      const [arr1, dep1, arr2, dep2] = await Promise.all([
-        getOpenSkyFlights(vAp.icao, "arrivals"),
-        getOpenSkyFlights(oAp.icao, "departures"),
-        getOpenSkyFlights(dAp.icao, "arrivals"),
-        getOpenSkyFlights(vAp.icao, "departures"),
-      ]);
-      const leg1 = matchFlights(dep1, arr1);
-      const leg2 = matchFlights(dep2, arr2);
-      const s1 = calcReliability(leg1);
-      const s2 = calcReliability(leg2);
-      result.routes.push({
-        id: via, path: [o, via, d],
-        label: `${oAp.city} → ${vAp.city} → ${dAp.city}`,
-        successRate: Math.round((s1.successRate / 100) * (s2.successRate / 100) * 100),
-        landed: Math.min(s1.landed, s2.landed),
-        cancelled: Math.max(s1.cancelled, s2.cancelled),
-        scheduled: Math.min(s1.scheduled, s2.scheduled),
-        inAir: Math.min(s1.inAir, s2.inAir),
-        total: Math.min(s1.total, s2.total),
-        flights: [...leg1, ...leg2],
-        airlineStats: calcAirlineStats([...leg1, ...leg2]),
-        isAlternate: true, via: vAp.city, viaCode: via,
-        leg1Stats: s1, leg2Stats: s2,
-      });
-    } catch (e) {
-      console.error(`Via ${via}: ${e.message}`);
-    }
+    const [viaArrivals, viaDepartures] = await Promise.all([
+      fetchOpenSky(vAp.icao, "arrivals"),
+      fetchOpenSky(vAp.icao, "departures"),
+    ]);
+    const leg1 = buildFlights(origDepartures, viaArrivals);   // origin → via
+    const leg2 = buildFlights(viaDepartures, destArrivals);   // via → dest
+    const s1 = calcReliability(leg1);
+    const s2 = calcReliability(leg2);
+    const combinedRate = Math.round((s1.successRate/100)*(s2.successRate/100)*100);
+    console.log(`Via ${via}: leg1=${s1.successRate}%, leg2=${s2.successRate}%, combined=${combinedRate}%`);
+
+    result.routes.push({
+      id:via, path:[o,via,d],
+      label:`${oAp.city} → ${vAp.city} → ${dAp.city}`,
+      successRate:combinedRate,
+      landed:Math.min(s1.landed,s2.landed),
+      cancelled:Math.max(s1.cancelled,s2.cancelled),
+      inAir:Math.min(s1.inAir,s2.inAir),
+      scheduled:0, total:Math.min(s1.total,s2.total),
+      flights:[...leg1,...leg2],
+      airlineStats:calcAirlineStats([...leg1,...leg2]),
+      isAlternate:true, via:vAp.city, viaCode:via,
+    });
   }
 
-  result.routes.sort((a, b) => b.successRate - a.successRate);
+  result.routes.sort((a,b) => b.successRate - a.successRate);
   res.json(result);
 });
 
+// ── /api/health ───────────────────────────────────────────────────────
 app.get("/api/health", async (req, res) => {
   await loadAirportDB();
   res.json({
-    status: "ok",
+    status:"ok",
     airportsLoaded: Object.keys(AIRPORT_DB).length,
     openSkyAuth: !!process.env.OPENSKY_USER,
-    dataSource: "opensky",
     time: new Date().toISOString(),
   });
 });
 
-// ── Start ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
   console.log(`✈  Escape Route API on port ${PORT}`);
   await loadAirportDB();
-  await testOpenSky();
 });
