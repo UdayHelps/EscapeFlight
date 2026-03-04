@@ -182,24 +182,21 @@ async function fetchFlights(iataCode, direction) {
 }
 
 // ── Map flight from AeroDataBox response — use API data directly ───────
-function mapFlight(f) {
-  // AeroDataBox gives us everything — airline name, airport names, status
-  // No need for any lookup tables
+function mapFlight(f, impliedDepIata, impliedArrIata) {
   const flightNum = f.number || f.callSign || "N/A";
   const airlineName = f.airline?.name || "Unknown Airline";
   const airlineCode = f.airline?.iata || f.airline?.icao || flightNum.slice(0, 2);
 
-  const depAirport = f.departure?.airport?.iata || f.departure?.airport?.icao || "?";
-  const arrAirport = f.arrival?.airport?.iata || f.arrival?.airport?.icao || "?";
+  const depAirport = f.departure?.airport?.iata || impliedDepIata || "?";
+  const arrAirport = f.arrival?.airport?.iata || impliedArrIata || "?";
   const depAirportName = f.departure?.airport?.name || depAirport;
   const arrAirportName = f.arrival?.airport?.name || arrAirport;
 
-  const depTime = f.departure?.scheduledTime?.local?.slice(11, 16)
-    || f.departure?.scheduledTime?.utc?.slice(11, 16) || "--:--";
-  const arrTime = f.arrival?.scheduledTime?.local?.slice(11, 16)
-    || f.arrival?.scheduledTime?.utc?.slice(11, 16) || "--:--";
-
-  const status = mapStatus(f.status);
+  // Use revised (actual) time if available, otherwise scheduled
+  const depTime = (f.departure?.revisedTime?.local || f.departure?.scheduledTime?.local)?.slice(11, 16)
+    || (f.departure?.revisedTime?.utc || f.departure?.scheduledTime?.utc)?.slice(11, 16) || "--:--";
+  const arrTime = (f.arrival?.revisedTime?.local || f.arrival?.scheduledTime?.local)?.slice(11, 16)
+    || (f.arrival?.revisedTime?.utc || f.arrival?.scheduledTime?.utc)?.slice(11, 16) || "--:--";
 
   return {
     flightNum,
@@ -211,10 +208,11 @@ function mapFlight(f) {
     arrAirport,
     depAirportName,
     arrAirportName,
-    status,
+    status: mapStatus(f.status),
     aircraft: f.aircraft?.model || null,
     terminal: f.arrival?.terminal || f.departure?.terminal || null,
     gate: f.arrival?.gate || f.departure?.gate || null,
+    baggage: f.arrival?.baggageBelt || null,
   };
 }
 
@@ -235,22 +233,22 @@ function buildDirectFlights(departures, arrivals, originIata, destIata) {
   const seen = new Set();
   const results = [];
 
-  // From arrivals: flights that came from origin
+  // From arrivals at destination: implied depAirport = origin
   arrivals.forEach(f => {
     const depIata = f.departure?.airport?.iata;
     if (originIata && depIata && depIata !== originIata) return;
-    const mapped = mapFlight(f);
+    const mapped = mapFlight(f, originIata, destIata);
     if (!seen.has(mapped.flightNum)) {
       seen.add(mapped.flightNum);
       results.push(mapped);
     }
   });
 
-  // From departures: flights going to destination
+  // From departures at origin: implied arrAirport = destination
   departures.forEach(f => {
     const arrIata = f.arrival?.airport?.iata;
     if (destIata && arrIata && arrIata !== destIata) return;
-    const mapped = mapFlight(f);
+    const mapped = mapFlight(f, originIata, destIata);
     if (!seen.has(mapped.flightNum)) {
       seen.add(mapped.flightNum);
       results.push(mapped);
@@ -464,7 +462,7 @@ app.get("/api/test", async (req, res) => {
     res.json({
       airport, icao: ap.icao, direction, url,
       totalFlights: flights.length,
-      sample: flights.slice(0, 2).map(mapFlight),
+      sample: flights.slice(0, 2).map(f => mapFlight(f, airport, null)),
       rawSample: flights[0] || null,
     });
   } catch (e) {
