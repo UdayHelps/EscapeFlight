@@ -7,24 +7,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── OpenSky auth helper ───────────────────────────────────────────────
 function osAuth() {
   if (process.env.OPENSKY_USER && process.env.OPENSKY_PASS)
     return { username: process.env.OPENSKY_USER, password: process.env.OPENSKY_PASS };
   return undefined;
 }
 
-// ── Global airport database — loaded from OurAirports (60,000+ airports) ─
+// ── Global airport database ───────────────────────────────────────────
 let AIRPORT_DB = {};
 let DB_LOADED = false;
 
 async function loadAirportDB() {
   if (DB_LOADED) return;
   try {
-    console.log("Loading global airport database...");
+    console.log("Loading airport database...");
     const resp = await axios.get(
       "https://davidmegginson.github.io/ourairports-data/airports.csv",
-      { timeout: 20000, responseType: "text" }
+      { timeout: 30000, responseType: "text" }
     );
     const lines = resp.data.split("\n");
     for (let i = 1; i < lines.length; i++) {
@@ -43,9 +42,9 @@ async function loadAirportDB() {
       }
     }
     DB_LOADED = true;
-    console.log(`Airport DB loaded: ${Object.keys(AIRPORT_DB).length} airports`);
+    console.log(`Airport DB: ${Object.keys(AIRPORT_DB).length} airports`);
   } catch (e) {
-    console.error("CSV load failed, using fallback:", e.message);
+    console.error("CSV failed, using fallback:", e.message);
     loadFallbackAirports();
   }
 }
@@ -116,26 +115,20 @@ function loadFallbackAirports() {
     ["CPT","FACT","Cape Town International","Cape Town","ZA",-33.9648,18.6017,"large_airport"],
     ["LOS","DNMM","Murtala Muhammed","Lagos","NG",6.5774,3.3212,"large_airport"],
     ["ACC","DGAA","Kotoka International","Accra","GH",5.6052,-0.1668,"large_airport"],
-    ["CAS","GMMN","Mohammed V International","Casablanca","MA",33.3675,-7.5898,"large_airport"],
     ["BOG","SKBO","El Dorado International","Bogota","CO",4.7016,-74.1469,"large_airport"],
-    ["LIM","SPJC","Jorge Chavez International","Lima","PE",-12.0219,-77.1143,"large_airport"],
-    ["SCL","SCEL","Arturo Merino Benitez","Santiago","CL",-33.3928,-70.7856,"large_airport"],
-    ["AKL","NZAA","Auckland Airport","Auckland","NZ",-37.0082,174.7917,"large_airport"],
-    ["MEL","YMML","Melbourne Airport","Melbourne","AU",-37.6733,144.8433,"large_airport"],
     ["GYD","UBBB","Heydar Aliyev International","Baku","AZ",40.4675,50.0467,"large_airport"],
     ["EVN","UDYZ","Zvartnots International","Yerevan","AM",40.1473,44.3959,"large_airport"],
     ["TBS","UGTB","Tbilisi International","Tbilisi","GE",41.6692,44.9547,"large_airport"],
     ["BEY","OLBA","Beirut Rafic Hariri","Beirut","LB",33.8209,35.4884,"large_airport"],
-    ["DAM","OSDI","Damascus International","Damascus","SY",33.4115,36.5156,"large_airport"],
+    ["DEL","VIDP","Indira Gandhi International","Delhi","IN",28.5562,77.1,"large_airport"],
   ];
   f.forEach(([iata,icao,name,city,country,lat,lon,type]) => {
     AIRPORT_DB[iata] = { iata, icao, name, lat, lon, city, country, type };
   });
   DB_LOADED = true;
-  console.log(`Fallback DB loaded: ${Object.keys(AIRPORT_DB).length} airports`);
+  console.log(`Fallback DB: ${Object.keys(AIRPORT_DB).length} airports`);
 }
 
-// ── Airline names ─────────────────────────────────────────────────────
 const AIRLINE_NAMES = {
   EK:"Emirates",QR:"Qatar Airways",EY:"Etihad Airways",AI:"Air India",
   "6E":"IndiGo",UK:"Vistara",SG:"SpiceJet",IX:"Air India Express",
@@ -158,55 +151,70 @@ const AIRLINE_NAMES = {
   AY:"Finnair",DY:"Norwegian",PC:"Pegasus Airlines",
   TP:"TAP Air Portugal",A3:"Aegean Airlines",
   SU:"Aeroflot",S7:"S7 Airlines",KC:"Air Astana",HY:"Uzbekistan Airways",
-  RO:"TAROM",XY:"flynas",
 };
 
-// ── OpenSky fetch ─────────────────────────────────────────────────────
-async function getOpenSkyFlights(icaoCode, type = "arrivals") {
+// ── OpenSky fetch with retry ──────────────────────────────────────────
+async function getOpenSkyFlights(icaoCode, type = "arrivals", retries = 2) {
   const now = Math.floor(Date.now() / 1000);
   const begin = now - 86400;
-  const resp = await axios.get(
+
+  // Try authenticated endpoint first, then anonymous
+  const endpoints = [
     `https://opensky-network.org/api/flights/${type}`,
-    {
-      params: { airport: icaoCode, begin, end: now },
-      auth: osAuth(),
-      timeout: 20000,
-      headers: { Accept: "application/json" },
+  ];
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await axios.get(endpoints[0], {
+        params: { airport: icaoCode, begin, end: now },
+        auth: osAuth(),
+        timeout: 30000,
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "EscapeRouteFinder/1.0",
+        },
+      });
+      const data = Array.isArray(resp.data) ? resp.data : [];
+      console.log(`[OpenSky] ${type} ${icaoCode}: ${data.length} flights`);
+      return data;
+    } catch (e) {
+      console.error(`[OpenSky] attempt ${attempt + 1} failed for ${icaoCode} ${type}: ${e.message}`);
+      if (attempt < retries) await sleep(2000);
     }
-  );
-  return Array.isArray(resp.data) ? resp.data : [];
+  }
+  return [];
 }
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function matchFlights(departures, arrivals) {
   const depMap = {};
   departures.forEach((d) => { const cs = d.callsign?.trim(); if (cs) depMap[cs] = d; });
 
   const results = [];
-  const usedCallsigns = new Set();
+  const seen = new Set();
 
   arrivals.forEach((a) => {
     const cs = a.callsign?.trim();
-    if (!cs || usedCallsigns.has(cs)) return;
-    usedCallsigns.add(cs);
+    if (!cs || seen.has(cs)) return;
+    seen.add(cs);
     const dep = depMap[cs] || null;
     const twoLetter = cs.slice(0, 2).toUpperCase();
-    const airlineName = AIRLINE_NAMES[twoLetter] || twoLetter;
     results.push({
       flightNum: cs,
       airline: twoLetter,
-      airlineName,
+      airlineName: AIRLINE_NAMES[twoLetter] || twoLetter,
       depTime: dep?.firstSeen ? new Date(dep.firstSeen * 1000).toISOString().slice(11, 16) : "--:--",
       arrTime: a.lastSeen ? new Date(a.lastSeen * 1000).toISOString().slice(11, 16) : "--:--",
-      status: a.lastSeen ? "LANDED" : "SCHEDULED",
+      status: "LANDED",
       source: "opensky",
     });
   });
 
-  // Also include departures not yet in arrivals (in-air or scheduled)
   departures.forEach((d) => {
     const cs = d.callsign?.trim();
-    if (!cs || usedCallsigns.has(cs)) return;
-    usedCallsigns.add(cs);
+    if (!cs || seen.has(cs)) return;
+    seen.add(cs);
     const twoLetter = cs.slice(0, 2).toUpperCase();
     results.push({
       flightNum: cs,
@@ -249,16 +257,15 @@ function calcAirlineStats(flights) {
     .sort((a, b) => b.rate - a.rate);
 }
 
-// Major hubs for alternate route calculation
 const MAJOR_HUBS = [
   "DXB","DOH","AUH","IST","LHR","CDG","FRA","AMS","ZRH","VIE","MAD","FCO",
   "SIN","HKG","BKK","KUL","NRT","ICN","PEK","PVG","CGK","DEL",
-  "JFK","LAX","ORD","MIA","ATL","DFW",
+  "JFK","LAX","ORD","MIA","ATL",
   "SYD","MEL","AKL",
   "CAI","ADD","JNB","NBO","LOS","ACC",
-  "GRU","EZE","BOG","MEX","LIM","SCL",
+  "GRU","EZE","BOG","MEX",
   "RUH","KWI","BAH","MCT","JED",
-  "SVO","YYZ","YVR","GYD",
+  "SVO","YYZ","GYD",
 ];
 
 function findViaHubs(o, d) {
@@ -279,81 +286,24 @@ function findViaHubs(o, d) {
     .map((h) => h.code);
 }
 
-// ── Routes endpoint ───────────────────────────────────────────────────
-app.get("/api/routes", async (req, res) => {
-  await loadAirportDB();
-  const { origin, destination } = req.query;
-  if (!origin || !destination) return res.status(400).json({ error: "origin and destination required" });
-
-  const o = origin.trim().toUpperCase();
-  const d = destination.trim().toUpperCase();
-  const oAp = AIRPORT_DB[o];
-  const dAp = AIRPORT_DB[d];
-
-  if (!oAp) return res.status(400).json({ error: `Airport not found: ${o}` });
-  if (!dAp) return res.status(400).json({ error: `Airport not found: ${d}` });
-  if (o === d) return res.status(400).json({ error: "Origin and destination must differ" });
-
-  const result = { origin: oAp, destination: dAp, routes: [], dataSource: "opensky", errors: [] };
-
-  // Direct route
-  let directFlights = [];
+// ── Test OpenSky connectivity on startup ──────────────────────────────
+async function testOpenSky() {
   try {
-    const [arrivals, departures] = await Promise.all([
-      getOpenSkyFlights(dAp.icao, "arrivals"),
-      getOpenSkyFlights(oAp.icao, "departures"),
-    ]);
-    directFlights = matchFlights(departures, arrivals);
-    console.log(`Direct ${o}→${d}: ${directFlights.length} flights`);
+    const now = Math.floor(Date.now() / 1000);
+    const resp = await axios.get("https://opensky-network.org/api/flights/arrivals", {
+      params: { airport: "OMDB", begin: now - 3600, end: now },
+      auth: osAuth(),
+      timeout: 30000,
+    });
+    console.log(`✅ OpenSky test OK — got ${Array.isArray(resp.data) ? resp.data.length : 0} flights for OMDB`);
+    return true;
   } catch (e) {
-    result.errors.push(`Direct: ${e.message}`);
+    console.error("❌ OpenSky test failed:", e.message);
+    return false;
   }
+}
 
-  const ds = calcReliability(directFlights);
-  result.routes.push({
-    id: "direct", path: [o, d],
-    label: `${oAp.city} → ${dAp.city}`,
-    ...ds, flights: directFlights,
-    airlineStats: calcAirlineStats(directFlights),
-    isAlternate: false,
-  });
-
-  // Alternate routes
-  const vias = findViaHubs(o, d);
-  const viaResults = await Promise.allSettled(vias.map(async (via) => {
-    const vAp = AIRPORT_DB[via];
-    const [arr1, dep1, arr2, dep2] = await Promise.all([
-      getOpenSkyFlights(vAp.icao, "arrivals"),
-      getOpenSkyFlights(oAp.icao, "departures"),
-      getOpenSkyFlights(dAp.icao, "arrivals"),
-      getOpenSkyFlights(vAp.icao, "departures"),
-    ]);
-    const leg1 = matchFlights(dep1, arr1);
-    const leg2 = matchFlights(dep2, arr2);
-    const s1 = calcReliability(leg1);
-    const s2 = calcReliability(leg2);
-    return {
-      id: via, path: [o, via, d],
-      label: `${oAp.city} → ${vAp.city} → ${dAp.city}`,
-      successRate: Math.round((s1.successRate / 100) * (s2.successRate / 100) * 100),
-      landed: Math.min(s1.landed, s2.landed),
-      cancelled: Math.max(s1.cancelled, s2.cancelled),
-      scheduled: Math.min(s1.scheduled, s2.scheduled),
-      inAir: Math.min(s1.inAir, s2.inAir),
-      total: Math.min(s1.total, s2.total),
-      flights: [...leg1, ...leg2],
-      airlineStats: calcAirlineStats([...leg1, ...leg2]),
-      isAlternate: true, via: vAp.city, viaCode: via,
-      leg1Stats: s1, leg2Stats: s2,
-    };
-  }));
-
-  viaResults.forEach((r) => { if (r.status === "fulfilled" && r.value) result.routes.push(r.value); });
-  result.routes.sort((a, b) => b.successRate - a.successRate);
-  res.json(result);
-});
-
-// ── Airport search endpoint ───────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────────────
 app.get("/api/airports", async (req, res) => {
   await loadAirportDB();
   const q = (req.query.q || "").toUpperCase().trim();
@@ -377,7 +327,87 @@ app.get("/api/airports", async (req, res) => {
   res.json(results);
 });
 
-// ── Health check ──────────────────────────────────────────────────────
+app.get("/api/routes", async (req, res) => {
+  await loadAirportDB();
+  const { origin, destination } = req.query;
+  if (!origin || !destination)
+    return res.status(400).json({ error: "origin and destination required" });
+
+  const o = origin.trim().toUpperCase();
+  const d = destination.trim().toUpperCase();
+  const oAp = AIRPORT_DB[o];
+  const dAp = AIRPORT_DB[d];
+
+  if (!oAp) return res.status(400).json({ error: `Airport not found: ${o}` });
+  if (!dAp) return res.status(400).json({ error: `Airport not found: ${d}` });
+  if (o === d) return res.status(400).json({ error: "Origin and destination must differ" });
+
+  const result = { origin: oAp, destination: dAp, routes: [], dataSource: "opensky", errors: [] };
+
+  // Fetch direct route — run arrivals and departures in parallel
+  let directFlights = [];
+  try {
+    console.log(`Fetching direct: ${o}(${oAp.icao}) → ${d}(${dAp.icao})`);
+    const [arrivals, departures] = await Promise.all([
+      getOpenSkyFlights(dAp.icao, "arrivals"),
+      getOpenSkyFlights(oAp.icao, "departures"),
+    ]);
+    console.log(`Raw: ${arrivals.length} arrivals at ${d}, ${departures.length} departures from ${o}`);
+    directFlights = matchFlights(departures, arrivals);
+    console.log(`Matched: ${directFlights.length} flights for ${o}→${d}`);
+  } catch (e) {
+    result.errors.push(`Direct: ${e.message}`);
+  }
+
+  const ds = calcReliability(directFlights);
+  result.routes.push({
+    id: "direct", path: [o, d],
+    label: `${oAp.city} → ${dAp.city}`,
+    ...ds, flights: directFlights,
+    airlineStats: calcAirlineStats(directFlights),
+    isAlternate: false,
+  });
+
+  // Fetch alternate routes (sequential to avoid rate limiting)
+  const vias = findViaHubs(o, d);
+  for (const via of vias) {
+    const vAp = AIRPORT_DB[via];
+    if (!vAp) continue;
+    try {
+      await sleep(1000); // be nice to OpenSky
+      const [arr1, dep1, arr2, dep2] = await Promise.all([
+        getOpenSkyFlights(vAp.icao, "arrivals"),
+        getOpenSkyFlights(oAp.icao, "departures"),
+        getOpenSkyFlights(dAp.icao, "arrivals"),
+        getOpenSkyFlights(vAp.icao, "departures"),
+      ]);
+      const leg1 = matchFlights(dep1, arr1);
+      const leg2 = matchFlights(dep2, arr2);
+      const s1 = calcReliability(leg1);
+      const s2 = calcReliability(leg2);
+      result.routes.push({
+        id: via, path: [o, via, d],
+        label: `${oAp.city} → ${vAp.city} → ${dAp.city}`,
+        successRate: Math.round((s1.successRate / 100) * (s2.successRate / 100) * 100),
+        landed: Math.min(s1.landed, s2.landed),
+        cancelled: Math.max(s1.cancelled, s2.cancelled),
+        scheduled: Math.min(s1.scheduled, s2.scheduled),
+        inAir: Math.min(s1.inAir, s2.inAir),
+        total: Math.min(s1.total, s2.total),
+        flights: [...leg1, ...leg2],
+        airlineStats: calcAirlineStats([...leg1, ...leg2]),
+        isAlternate: true, via: vAp.city, viaCode: via,
+        leg1Stats: s1, leg2Stats: s2,
+      });
+    } catch (e) {
+      console.error(`Via ${via}: ${e.message}`);
+    }
+  }
+
+  result.routes.sort((a, b) => b.successRate - a.successRate);
+  res.json(result);
+});
+
 app.get("/api/health", async (req, res) => {
   await loadAirportDB();
   res.json({
@@ -389,8 +419,10 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
+// ── Start ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
   console.log(`✈  Escape Route API on port ${PORT}`);
   await loadAirportDB();
+  await testOpenSky();
 });
