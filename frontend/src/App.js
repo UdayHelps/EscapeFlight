@@ -11,7 +11,6 @@ const DARK = {
   bgHover:   "#0f172a",
   bgInput:   "#020817",
   bgHeader:  "#020817f0",
-  bgBrag:    "#020817f0",
   border:    "#0f172a",
   border2:   "#1e293b",
   text:      "#e2e8f0",
@@ -26,9 +25,6 @@ const DARK = {
   labelText: "#64748b",
   spinBg:    "#0f172a",
   scrollbar: "#334155",
-  intro:     "#1e293b",
-  introBorder:"#0f172a",
-  introText: "#64748b",
 };
 
 const LIGHT = {
@@ -39,7 +35,6 @@ const LIGHT = {
   bgHover:   "#f1f5f9",
   bgInput:   "#ffffff",
   bgHeader:  "#ffffffee",
-  bgBrag:    "#ffffffee",
   border:    "#e2e8f0",
   border2:   "#cbd5e1",
   text:      "#0f172a",
@@ -54,9 +49,6 @@ const LIGHT = {
   labelText: "#64748b",
   spinBg:    "#e2e8f0",
   scrollbar: "#cbd5e1",
-  intro:     "#fff7ed",
-  introBorder:"#fed7aa",
-  introText: "#9a3412",
 };
 
 const SEVERITY = {
@@ -71,7 +63,7 @@ const CAT_ICONS={Conflict:"⚔️",Airspace:"🚫",Weather:"🌪️",Political:"
 function StatusBadge({status}){
   const m={
     LANDED:    {bg:"#052e16",c:"#4ade80",b:"#166534"},
-    COMPLETED: {bg:"#052e16",c:"#4ade80",b:"#166534"},
+    COMPLETED: {bg:"#052e16",c:"#4ade80",b:"#166634"},
     CANCELLED: {bg:"#2d0f0f",c:"#f87171",b:"#7f1d1d"},
     IN_AIR:    {bg:"#0c1a40",c:"#60a5fa",b:"#1e3a8a"},
     SCHEDULED: {bg:"#1e293b",c:"#94a3b8",b:"#334155"},
@@ -426,7 +418,6 @@ export default function App(){
               <span className="pulse-dot" style={{width:5,height:5,borderRadius:"50%",background:"#4ade80",display:"inline-block",flexShrink:0}}/>
               {new Date().toUTCString().slice(5,22)} UTC
             </span>
-            {/* Light/Dark toggle */}
             <button onClick={()=>setDarkMode(m=>!m)}
               title={darkMode?"Switch to light mode":"Switch to dark mode"}
               style={{background:T.bgCard,border:`1px solid ${T.border2}`,borderRadius:20,padding:"4px 10px",color:T.textSub,fontSize:13,display:"flex",alignItems:"center",gap:5,transition:"all 0.2s"}}>
@@ -436,22 +427,17 @@ export default function App(){
         </div>
       </header>
 
-      <div style={{maxWidth:1200,margin:"0 auto",padding:"14px 14px",paddingBottom:bragging.flightsTracked>0?"80px":"14px"}}>
+      <div style={{maxWidth:1200,margin:"0 auto",padding:"20px 14px 60px"}}>
         <div className="fade-in">
 
-          {/* ── INTRO BLURB ── */}
-          <div style={{background:T.intro,border:`1px solid ${T.introBorder}`,borderRadius:10,padding:"14px 18px",marginBottom:16}}>
-            <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
-              <span style={{fontSize:22,flexShrink:0}}>🛫</span>
-              <div>
-                <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:14,color:T.accent,marginBottom:4,letterSpacing:"0.5px"}}>WHAT IS ESCAPEROUTE?</div>
-                <p style={{fontSize:13,color:T.introText,lineHeight:1.7,margin:0}}>
-                  EscapeRoute gives you real-time intelligence on any flight route — pulling live departure and arrival data from global aviation feeds.
-                  Enter any two airports to instantly see the last 24 hours of flights, cancellation rates, airline performance, and AI-assessed world events that may affect your route.
-                  Use the <strong>Next 24h</strong> tab to see upcoming scheduled flights with a data-driven probability of them actually operating.
-                </p>
-              </div>
-            </div>
+          {/* ── INTRO — clean 2 lines, no box, no icon ── */}
+          <div style={{marginBottom:20,paddingBottom:18,borderBottom:`1px solid ${T.border}`}}>
+            <p style={{margin:"0 0 4px",fontSize:13,color:T.textMuted,lineHeight:1.7}}>
+              Real-time flight intelligence for any route — live departures, cancellation rates, airline reliability, and AI-assessed world events.
+            </p>
+            <p style={{margin:0,fontSize:12,color:T.textDim}}>
+              Enter two airport codes below to check the last 24 hours of flights, or see what's scheduled next.
+            </p>
           </div>
 
           {/* ── SEARCH PANEL ── */}
@@ -491,7 +477,6 @@ export default function App(){
           {/* ── RESULTS ── */}
           {!loading&&result&&(
             <div className="fade-in">
-              {/* Route header + stats */}
               <div style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:12,padding:"14px 18px",marginBottom:14}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
                   <div>
@@ -540,7 +525,6 @@ export default function App(){
                 ))}
               </div>
 
-              {/* Last 24h */}
               {activeTab==="24h"&&(
                 <div className="fade-in" style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:12,overflow:"hidden"}}>
                   <div style={{padding:"9px 14px",borderBottom:`1px solid ${T.border}`,fontSize:9,color:T.textDim,letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>
@@ -550,7 +534,6 @@ export default function App(){
                 </div>
               )}
 
-              {/* Next 24h */}
               {activeTab==="future"&&(
                 <div className="fade-in" style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:12,overflow:"hidden"}}>
                   <div style={{padding:"9px 14px",borderBottom:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -576,7 +559,6 @@ export default function App(){
                 </div>
               )}
 
-              {/* Airlines */}
               {activeTab==="airlines"&&(
                 <div className="fade-in" style={{display:"grid",gap:10}}>
                   {airlineStats.length===0?(
@@ -685,27 +667,35 @@ export default function App(){
             )}
           </div>
 
+          {/* ── FOOTER STATS — scrolls with page, no fixed bar ── */}
+          {bragging.flightsTracked>0&&(
+            <div style={{marginTop:52,paddingTop:28,borderTop:`1px solid ${T.border}`}}>
+              <div style={{display:"flex",gap:48,justifyContent:"center",flexWrap:"wrap"}}>
+                {[
+                  {value:bragging.flightsTracked.toLocaleString(),label:"flights tracked"},
+                  {value:bragging.cancellationsCaught.toLocaleString(),label:"cancellations caught"},
+                  {value:bragging.routesScanned.toLocaleString(),label:"routes scanned"},
+                ].map(s=>(
+                  <div key={s.label} style={{textAlign:"center"}}>
+                    <div style={{
+                      fontSize:28,fontWeight:800,
+                      fontFamily:"'Syne',sans-serif",
+                      color:T.text,
+                      letterSpacing:"-1px",
+                      lineHeight:1,
+                    }}>{s.value}</div>
+                    <div style={{fontSize:11,color:T.textDim,marginTop:6}}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+              <p style={{textAlign:"center",marginTop:16,fontSize:11,color:T.textDim2,margin:"16px 0 0"}}>
+                Data sourced from global aviation feeds · refreshes every few minutes
+              </p>
+            </div>
+          )}
+
         </div>
       </div>
-
-      {/* ── BRAG BAR ── */}
-      {bragging.flightsTracked>0&&(
-        <div style={{borderTop:`1px solid ${T.border}`,background:T.bgBrag,backdropFilter:"blur(16px)",position:"fixed",bottom:0,left:0,right:0,zIndex:100}}>
-          <div style={{maxWidth:1200,margin:"0 auto",padding:"10px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:32,flexWrap:"wrap"}}>
-            {[
-              {icon:"✈",value:bragging.flightsTracked.toLocaleString(),label:"FLIGHTS TRACKED"},
-              {icon:"🚫",value:bragging.cancellationsCaught.toLocaleString(),label:"CANCELLATIONS CAUGHT"},
-              {icon:"🛫",value:bragging.routesScanned.toLocaleString(),label:"ROUTES SCANNED"},
-            ].map(s=>(
-              <div key={s.label} style={{display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:14}}>{s.icon}</span>
-                <span style={{fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold",fontSize:16,color:T.accent}}>{s.value}</span>
-                <span style={{fontSize:9,color:T.textDim,letterSpacing:"2px"}}>{s.label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
