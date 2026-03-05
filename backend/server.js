@@ -126,13 +126,11 @@ function loadFallbackAirports() {
 }
 
 // ── Core fetch — single window, max 12h, Tier 2 = 2 units ────────────
-async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = true) {
-  // Use exact minute-level timestamps in cache key (no rounding).
-  // fetchTimeRange already produces stable windows via chunking.
-  const fmt      = d => d.toISOString().slice(0, 13); // round to hour for stable key
-  const cacheKey = `${icao}-${direction}-${fmt(fromDate)}-${fmt(toDate)}`;
+async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = true, attempt = 1) {
+  const fmt      = d => d.toISOString().slice(0, 16);
+  const fmtHour  = d => d.toISOString().slice(0, 13); // hour-level for stable cache key
+  const cacheKey = `${icao}-${direction}-${fmtHour(fromDate)}-${fmtHour(toDate)}`;
   const ttl      = isHistorical ? HISTORICAL_TTL : LIVE_TTL;
-  const fmtFull  = d => d.toISOString().slice(0, 16); // for API URL
   const cached   = getCached(cacheKey, ttl);
   if (cached) {
     console.log(`[Cache HIT] ${cacheKey}`);
@@ -142,7 +140,7 @@ async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = tru
     console.warn(`[Quota GUARD] Not enough units for ${cacheKey} — returning empty`);
     return [];
   }
-  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmtFull(fromDate)}/${fmtFull(toDate)}`;
+  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmt(fromDate)}/${fmt(toDate)}`;
   try {
     const resp = await axios.get(url, {
       params: {
@@ -155,7 +153,7 @@ async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = tru
         withLocation:   "false",
       },
       headers: { "x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST },
-      timeout: 20000,
+      timeout: 25000,
     });
     trackUsage(2);
     let data = [];
@@ -166,8 +164,16 @@ async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = tru
     setCache(cacheKey, data);
     return data;
   } catch (e) {
-    console.error(`[ADB ERROR] ${icao} ${direction}: HTTP ${e.response?.status} — ${e.message}`);
+    const status = e.response?.status;
+    console.error(`[ADB ERROR] ${icao} ${direction}: HTTP ${status} — ${e.message}`);
     if (e.response?.data) console.error("[ADB Body]", JSON.stringify(e.response.data).slice(0, 400));
+    // Retry once on 429 (rate limit) or 5xx with exponential backoff
+    if (attempt < 3 && (status === 429 || status >= 500 || !status)) {
+      const delay = attempt * 2000; // 2s, 4s
+      console.warn(`[ADB RETRY] Attempt ${attempt + 1} for ${icao} ${direction} in ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+      return fetchWindow(icao, direction, fromDate, toDate, isHistorical, attempt + 1);
+    }
     return [];
   }
 }
@@ -646,24 +652,26 @@ app.get("/api/routes", async (req, res) => {
     return res.json({ ...routeCached, flights: freshened, last24h: freshened, stats: freshStats, fromCache: true });
   }
 
-  // ── DUAL-AIRPORT DUAL-DIRECTION STRATEGY ────────────────────────────
-  // We now fetch ALL FOUR combinations to maximise status coverage:
-  //
-  //  1. Origin  DEPARTURES → catches flights leaving origin
-  //  2. Origin  ARRIVALS   → catches return legs / same-aircraft flights
-  //  3. Dest    ARRIVALS   → KEY: destination arrival confirms the flight landed
-  //  4. Dest    DEPARTURES → catches flights that departed destination (confirms operated)
-  //
-  // buildFlights() merges all four, always picking the BEST status.
-  // If origin says UNKNOWN but destination says LANDED → we show LANDED.
-  // ────────────────────────────────────────────────────────────────────
-  console.log(`\n=== ROUTE ${o}→${d} | 24h | dual-airport strategy | ~16 units ===`);
-  const [origDeps, origArrs, destArrs, destDeps] = await Promise.all([
-    fetchTimeRange(oAp.icao, "Departure", 24, 0, true),
-    fetchTimeRange(oAp.icao, "Arrival",   24, 0, true),
-    fetchTimeRange(dAp.icao, "Arrival",   24, 0, true),
-    fetchTimeRange(dAp.icao, "Departure", 24, 0, true),
-  ]);
+  // ── SERIALIZED FETCHES to avoid RapidAPI burst rate limiting ────────
+  // Promise.all fires all 8 windows simultaneously → RapidAPI drops most.
+  // Sequential with 300ms gaps ensures each window gets a clean response.
+  const delay = ms => new Promise(r => setTimeout(r, ms));
+  console.log(`\n=== ROUTE ${o}→${d} | 24h | dual-airport strategy ===`);
+
+  console.log(`  Fetching origDeps (${o} Departure)...`);
+  const origDeps = await fetchTimeRange(oAp.icao, "Departure", 24, 0, true);
+  await delay(300);
+
+  console.log(`  Fetching origArrs (${o} Arrival)...`);
+  const origArrs = await fetchTimeRange(oAp.icao, "Arrival", 24, 0, true);
+  await delay(300);
+
+  console.log(`  Fetching destArrs (${d} Arrival)...`);
+  const destArrs = await fetchTimeRange(dAp.icao, "Arrival", 24, 0, true);
+  await delay(300);
+
+  console.log(`  Fetching destDeps (${d} Departure)...`);
+  const destDeps = await fetchTimeRange(dAp.icao, "Departure", 24, 0, true);
 
   console.log(`  Raw feeds:`);
   console.log(`    origDeps (${o} departures): ${origDeps.length}`);
