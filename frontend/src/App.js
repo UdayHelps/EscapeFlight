@@ -369,7 +369,7 @@ export default function App(){
             {loading&&(
               <div style={{textAlign:"center",padding:"60px 20px"}}>
                 <div style={{width:34,height:34,border:"3px solid #0f172a",borderTop:"3px solid #f97316",borderRadius:"50%",margin:"0 auto 14px",animation:"spin 0.8s linear infinite"}}/>
-                <div style={{fontSize:11,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>FETCHING 48H DATA<span className="blink">_</span></div>
+                <div style={{fontSize:11,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>FETCHING 24H DATA<span className="blink">_</span></div>
               </div>
             )}
 
@@ -384,7 +384,7 @@ export default function App(){
                         <span style={{color:"#4ade80"}}>{result.destination?.city}</span>
                       </div>
                       <div style={{fontSize:9,color:"#334155",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>
-                        {result.origin?.iata} → {result.destination?.iata} · 48H HISTORY
+                        {result.origin?.iata} → {result.destination?.iata} · 24H HISTORY
                         {/* FIX: show debug match counts so you can verify data quality */}
                         {result.debug&&<span style={{marginLeft:10,color:"#1e3a5f"}}>· {result.debug.rawDepartures} dep · {result.debug.rawArrivals} arr · {result.debug.matched} matched</span>}
                       </div>
@@ -409,9 +409,9 @@ export default function App(){
 
                 <div style={{display:"flex",gap:4,marginBottom:12,overflowX:"auto",paddingBottom:2}}>
                   {[
-                    {id:"24h",label:"Last 24h",count:last24h.length},
-                    {id:"48h",label:"Last 48h",count:prev24h.length,subtitle:"(24-48h ago)"},
-                    {id:"future",label:"Next 24h",count:futureFlights.length,future:true},
+                    {id:"24h",label:"Last 12h",count:last24h.filter(f=>f.depTime!=="--:--").length},
+                    {id:"48h",label:"Prev 12h",count:prev24h.filter(f=>f.depTime!=="--:--").length},
+                    {id:"future",label:"Next 12h",count:futureFlights.length,future:true},
                     {id:"airlines",label:"Airlines"},
                   ].map(tab=>(
                     <button key={tab.id}
@@ -430,7 +430,7 @@ export default function App(){
                 {activeTab==="24h"&&(
                   <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
                     <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>
-                      ▸ LAST 24H · {last24h.length} FLIGHTS
+                      ▸ LAST 12H · {last24h.length} FLIGHTS
                     </div>
                     <FlightTable flights={last24h} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
                   </div>
@@ -439,7 +439,7 @@ export default function App(){
                 {activeTab==="48h"&&(
                   <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
                     <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>
-                      ▸ 24-48H AGO · {prev24h.length} FLIGHTS
+                      ▸ PREV 12H · {prev24h.length} FLIGHTS
                     </div>
                     <FlightTable flights={prev24h} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
                   </div>
@@ -448,7 +448,7 @@ export default function App(){
                 {activeTab==="future"&&(
                   <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
                     <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <span style={{fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>▸ NEXT 24H · {futureFlights.length} SCHEDULED</span>
+                      <span style={{fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>▸ NEXT 12H · {futureFlights.length} SCHEDULED</span>
                       <button onClick={loadFuture} disabled={futureLoading}
                         style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:5,padding:"3px 10px",color:"#f97316",fontSize:10}}>
                         {futureLoading?"loading...":"↻ refresh"}
