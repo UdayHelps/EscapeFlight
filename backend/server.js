@@ -376,7 +376,11 @@ function calcFlyScores(futureFlights, historicalFlights, airlineStatsMap) {
   });
 }
 
-// ── AI Prediction (Groq — free, no AeroDataBox units consumed) ────────
+// ── Shared session counter (persists while server runs on Render) ─────
+// Anyone hitting the API increments this — so the brag bar reflects real usage
+const GLOBAL_STATS = { flightsTracked: 0, cancellationsCaught: 0, routesScanned: 0 };
+
+
 async function getAIPrediction(flight, historicalFlights, airlineStats, routeStats) {
   if (!GROQ_API_KEY) return null;
   const airlineStat       = airlineStats.find(a => a.name === flight.airlineName);
@@ -432,33 +436,32 @@ app.get("/api/routes", async (req, res) => {
     return res.json({ ...routeCached, fromCache: true });
   }
 
-  // 24h history = 2 chunks × 2 airports = 4 calls = 8 units
+  // 2 directions only — departures from origin + arrivals at destination
+  // = 2 chunks × 2 airports = 4 calls = 8 units. Anything more is wasteful.
   console.log(`\n=== ROUTE ${o}→${d} | 24h | ~8 units ===`);
   const [origDeps, destArrs] = await Promise.all([
     fetchTimeRange(oAp.icao, "Departure", 24, 0, true),
     fetchTimeRange(dAp.icao, "Arrival",   24, 0, true),
   ]);
 
-  console.log(`  Raw: ${origDeps.length} deps / ${destArrs.length} arrs`);
+  console.log(`  Raw: ${origDeps.length} deps from ${o} / ${destArrs.length} arrs at ${d}`);
   const flights      = buildFlights(origDeps, destArrs, o, d);
   const stats        = calcStats(flights);
   const airlineStats = calcAirlineStats(flights);
-  console.log(`  Matched: ${flights.length} flights`);
+  console.log(`  Matched: ${flights.length} flights (${stats.cancelled} cancelled, ${(stats.landed||0)+(stats.completed||0)} operated)`);
 
-  // Split into two 12h buckets for the tabs
-  const now           = new Date();
-  const mid12hCutoff  = new Date(now.getTime() - 12 * 3600000);
-  const last12h       = flights.filter(f => f.depDate && f.depTime !== "--:--" && new Date(`${f.depDate}T${f.depTime}`) >= mid12hCutoff);
-  const prev12h       = flights.filter(f => f.depDate && f.depTime !== "--:--" && new Date(`${f.depDate}T${f.depTime}`) <  mid12hCutoff);
+  // Update global brag counter
+  GLOBAL_STATS.flightsTracked      += stats.total;
+  GLOBAL_STATS.cancellationsCaught += stats.cancelled;
+  GLOBAL_STATS.routesScanned       += 1;
 
   const payload = {
     origin: oAp, destination: dAp,
     dataWindow: "24h history",
     stats, airlineStats, flights,
-    last24h: flights,   // frontend compat alias
-    last12h, prev12h,
-    prev24h: prev12h,   // frontend compat alias
+    last24h: flights,
     dataSource: "aerodatabox",
+    globalStats: GLOBAL_STATS,
     debug: {
       rawDepartures: origDeps.length,
       rawArrivals:   destArrs.length,
@@ -619,6 +622,9 @@ app.get("/api/health", async (req, res) => {
     time: new Date().toISOString(),
   });
 });
+
+// /api/stats — global brag counter, shared across all users
+app.get("/api/stats", (req, res) => res.json(GLOBAL_STATS));
 
 // /api/quota — quick quota check
 app.get("/api/quota", (req, res) => {
