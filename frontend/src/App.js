@@ -274,12 +274,20 @@ export default function App(){
   const [activeTab,setActiveTab]=useState("24h");
   const [flyScores,setFlyScores]=useState([]);
   const [bragging,setBragging]=useState({flightsTracked:0,cancellationsCaught:0,routesScanned:0});
+  const [eventsExpanded,setEventsExpanded]=useState(false);
   const [events,setEvents]=useState([]);
   const [eventsLoading,setEventsLoading]=useState(false);
   const [expandedEvent,setExpandedEvent]=useState(null);
   // FIX: removed selectedFlight state — no longer needed since panels are inline
 
-  useEffect(()=>{loadEvents();},[]);
+  useEffect(()=>{
+    loadEvents();
+    fetch(`${API}/api/stats`).then(r=>r.json()).then(d=>setBragging({
+      flightsTracked:      d.flightsTracked||0,
+      cancellationsCaught: d.cancellationsCaught||0,
+      routesScanned:       d.routesScanned||0,
+    })).catch(()=>{});
+  },[]);
 
   const loadEvents=async()=>{
     setEventsLoading(true);
@@ -299,11 +307,11 @@ export default function App(){
       if(!r.ok){const e=await r.json();throw new Error(e.error||"API error");}
       const data=await r.json();
       setResult(data);
-      setBragging(prev=>({
-        flightsTracked:    prev.flightsTracked    + (data.stats?.total||0),
-        cancellationsCaught: prev.cancellationsCaught + (data.stats?.cancelled||0),
-        routesScanned:     prev.routesScanned     + 1,
-      }));
+      if(data.globalStats) setBragging({
+        flightsTracked:      data.globalStats.flightsTracked||0,
+        cancellationsCaught: data.globalStats.cancellationsCaught||0,
+        routesScanned:       data.globalStats.routesScanned||0,
+      });
       if(data.debug){
         console.log(`[EscapeRoute] Raw departures: ${data.debug.rawDepartures}, Raw arrivals: ${data.debug.rawArrivals}, Matched: ${data.debug.matched}`);
       }
@@ -373,13 +381,6 @@ export default function App(){
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={{width:32,height:32,borderRadius:7,background:"linear-gradient(135deg,#f97316,#dc2626)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,animation:"glow 3s ease infinite"}}>✈</div>
             <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,letterSpacing:"-0.5px",color:"#f1f5f9"}}>ESCAPE<span style={{color:"#f97316"}}>ROUTE</span></div>
-          </div>
-          <div style={{display:"flex",gap:4}}>
-            <button onClick={()=>setActiveView("search")}
-              style={{background:"#1e293b",border:"1px solid #f97316",borderRadius:7,padding:"6px 12px",color:"#f97316",fontSize:12,display:"flex",alignItems:"center",gap:5}}>
-              <span>✈</span>
-              <span className="tab-label">Routes</span>
-            </button>
           </div>
           <span style={{display:"flex",alignItems:"center",gap:5,color:"#334155",fontSize:10,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>
             <span className="pulse-dot" style={{width:5,height:5,borderRadius:"50%",background:"#4ade80",display:"inline-block",flexShrink:0}}/>
@@ -548,7 +549,7 @@ export default function App(){
               </div>
             )}
 
-            {/* ── WORLD EVENTS — always visible below flight data ── */}
+            {/* ── WORLD EVENTS — inline below flight data ── */}
             <div style={{marginTop:24}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
                 <div>
@@ -583,22 +584,31 @@ export default function App(){
                 </div>
               )}
 
-              {!eventsLoading&&events.length>0&&(
-                <div style={{display:"grid",gap:0}}>
-                  {/* Critical/High first */}
-                  {events.filter(e=>["S4","S5"].includes(e.severity)).map(ev=>(
-                    <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
-                  ))}
-                  {/* Then moderate */}
-                  {events.filter(e=>e.severity==="S3").map(ev=>(
-                    <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
-                  ))}
-                  {/* Then monitor/low — collapsed by default, show as a subtle group */}
-                  {events.filter(e=>["S1","S2"].includes(e.severity)).map(ev=>(
-                    <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
-                  ))}
-                </div>
-              )}
+              {!eventsLoading&&events.length>0&&(()=>{
+                const sorted=[
+                  ...events.filter(e=>["S4","S5"].includes(e.severity)),
+                  ...events.filter(e=>e.severity==="S3"),
+                  ...events.filter(e=>["S1","S2"].includes(e.severity)),
+                ];
+                const visible = eventsExpanded ? sorted : sorted.slice(0,3);
+                return(
+                  <>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10,marginBottom:10}}>
+                      {visible.map(ev=>(
+                        <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
+                      ))}
+                    </div>
+                    {sorted.length>3&&(
+                      <button onClick={()=>setEventsExpanded(x=>!x)}
+                        style={{width:"100%",background:"#080f1e",border:"1px solid #0f172a",borderRadius:8,padding:"9px",color:"#475569",fontSize:11,cursor:"pointer",fontFamily:"'JetBrains Mono',monospace",letterSpacing:"1px"}}
+                        onMouseEnter={e=>{e.currentTarget.style.borderColor="#f97316";e.currentTarget.style.color="#f97316"}}
+                        onMouseLeave={e=>{e.currentTarget.style.borderColor="#0f172a";e.currentTarget.style.color="#475569"}}>
+                        {eventsExpanded?`▲ SHOW LESS`:`▼ VIEW ${sorted.length-3} MORE EVENTS`}
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
 
               {!eventsLoading&&events.length===0&&(
                 <div style={{textAlign:"center",padding:"30px 20px",background:"#080f1e",border:"1px solid #0f172a",borderRadius:12}}>
