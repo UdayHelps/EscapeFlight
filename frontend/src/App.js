@@ -63,6 +63,50 @@ function AirportInput({label,value,onChange,color}){
   );
 }
 
+// FIX: PredictionPanel now inline per-flight, not below the whole table
+function PredictionPanel({flight,prediction}){
+  if(!prediction)return null;
+  const flyColor=prediction.flyProbability>=70?"#4ade80":prediction.flyProbability>=50?"#facc15":"#f87171";
+  return(
+    <tr>
+      <td colSpan={7} style={{padding:"0 12px 12px",background:"#040a14"}}>
+        <div style={{background:"#080f1e",border:"1px solid #1e293b",borderRadius:12,padding:"16px 18px",marginTop:4}}>
+          <div style={{fontSize:9,color:"#475569",letterSpacing:"3px",marginBottom:12}}>▸ AI PREDICTION · {flight.flightNum} · {flight.airlineName}</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            <div style={{background:"#052e16",border:"1px solid #166534",borderRadius:8,padding:12,textAlign:"center"}}>
+              <div style={{fontSize:9,color:"#4ade80",letterSpacing:"2px",marginBottom:4}}>CHANCE OF FLYING</div>
+              <div style={{fontSize:32,fontWeight:"bold",color:flyColor,fontFamily:"'JetBrains Mono',monospace"}}>{prediction.flyProbability}%</div>
+            </div>
+            <div style={{background:"#2d0f0f",border:"1px solid #7f1d1d",borderRadius:8,padding:12,textAlign:"center"}}>
+              <div style={{fontSize:9,color:"#f87171",letterSpacing:"2px",marginBottom:4}}>CHANCE OF CANCEL</div>
+              <div style={{fontSize:32,fontWeight:"bold",color:"#f87171",fontFamily:"'JetBrains Mono',monospace"}}>{prediction.cancelProbability}%</div>
+            </div>
+          </div>
+          <div style={{background:"#030712",borderRadius:4,height:6,overflow:"hidden",marginBottom:14}}>
+            <div style={{height:"100%",width:`${prediction.flyProbability}%`,background:`linear-gradient(90deg,#f97316,${flyColor})`,borderRadius:4,transition:"width 0.8s ease"}}/>
+          </div>
+          <p style={{color:"#94a3b8",fontSize:12,lineHeight:1.7,marginBottom:10}}>{prediction.reasoning}</p>
+          {prediction.riskFactors?.length>0&&(
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:9,color:"#475569",letterSpacing:"2px",marginBottom:6}}>RISK FACTORS</div>
+              {prediction.riskFactors.map((r,i)=>(
+                <div key={i} style={{color:"#64748b",fontSize:11,marginBottom:3}}>⚠ {r}</div>
+              ))}
+            </div>
+          )}
+          {prediction.recommendation&&(
+            <div style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:6,padding:"8px 12px",fontSize:11,color:"#22d3ee"}}>
+              💡 {prediction.recommendation}
+            </div>
+          )}
+          <div style={{marginTop:8,fontSize:10,color:"#334155"}}>Confidence: {prediction.confidence} · Based on 48h historical data</div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// FIX: FlightTable renders PredictionPanel inline per row, no more single shared panel
 function FlightTable({flights,onPredict,predictions,loadingPrediction}){
   if(!flights||flights.length===0)
     return <div style={{padding:40,textAlign:"center",color:"#334155",fontSize:12}}>No flights in this window.</div>;
@@ -81,75 +125,41 @@ function FlightTable({flights,onPredict,predictions,loadingPrediction}){
             const pred=predictions[f.flightNum];
             const isAirborne=f.status==="IN_AIR";
             return(
-              <tr key={i} style={{borderBottom:"1px solid #0f172a44",background:i%2===0?"#080f1e":"#040a14"}}
-                onMouseEnter={e=>e.currentTarget.style.background="#0f172a"}
-                onMouseLeave={e=>e.currentTarget.style.background=i%2===0?"#080f1e":"#040a14"}>
-                <td style={{padding:"9px 12px",color:"#22d3ee",fontWeight:"bold",fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>{f.flightNum}</td>
-                <td style={{padding:"9px 12px",color:"#94a3b8",maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.airlineName}</td>
-                <td style={{padding:"9px 12px",color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>{f.depTime}</td>
-                <td style={{padding:"9px 12px",color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>{f.arrTime}</td>
-                <td style={{padding:"9px 12px",color:"#475569",fontSize:10,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.aircraft||"—"}</td>
-                <td style={{padding:"9px 12px",whiteSpace:"nowrap"}}><StatusBadge status={f.status}/></td>
-                <td style={{padding:"9px 12px"}}>
-                  {isAirborne?(
-                    <span style={{fontSize:10,color:"#60a5fa"}}>✈ AIRBORNE</span>
-                  ):f.status==="LANDED"?(
-                    <span style={{fontSize:10,color:"#4ade80"}}>✓ LANDED</span>
-                  ):f.status==="CANCELLED"?(
-                    <span style={{fontSize:10,color:"#f87171"}}>✗ CANCELLED</span>
-                  ):pred?(
-                    <span style={{fontSize:10,color:pred.flyProbability>=70?"#4ade80":pred.flyProbability>=50?"#facc15":"#f87171",fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{pred.flyProbability}% fly</span>
-                  ):(
-                    <button onClick={()=>onPredict(f)}
-                      disabled={loadingPrediction===f.flightNum}
-                      style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:4,padding:"3px 8px",color:"#f97316",fontSize:10,cursor:"pointer",whiteSpace:"nowrap"}}>
-                      {loadingPrediction===f.flightNum?"...":" AI ▸"}
-                    </button>
-                  )}
-                </td>
-              </tr>
+              <React.Fragment key={`${f.flightNum}-${i}`}>
+                <tr style={{borderBottom:"1px solid #0f172a44",background:i%2===0?"#080f1e":"#040a14"}}
+                  onMouseEnter={e=>e.currentTarget.style.background="#0f172a"}
+                  onMouseLeave={e=>e.currentTarget.style.background=i%2===0?"#080f1e":"#040a14"}>
+                  <td style={{padding:"9px 12px",color:"#22d3ee",fontWeight:"bold",fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>{f.flightNum}</td>
+                  <td style={{padding:"9px 12px",color:"#94a3b8",maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.airlineName}</td>
+                  <td style={{padding:"9px 12px",color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>{f.depTime}</td>
+                  <td style={{padding:"9px 12px",color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>{f.arrTime}</td>
+                  <td style={{padding:"9px 12px",color:"#475569",fontSize:10,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.aircraft||"—"}</td>
+                  <td style={{padding:"9px 12px",whiteSpace:"nowrap"}}><StatusBadge status={f.status}/></td>
+                  <td style={{padding:"9px 12px"}}>
+                    {isAirborne?(
+                      <span style={{fontSize:10,color:"#60a5fa"}}>✈ AIRBORNE</span>
+                    ):f.status==="LANDED"?(
+                      <span style={{fontSize:10,color:"#4ade80"}}>✓ LANDED</span>
+                    ):f.status==="CANCELLED"?(
+                      <span style={{fontSize:10,color:"#f87171"}}>✗ CANCELLED</span>
+                    ):pred?(
+                      <span style={{fontSize:10,color:pred.flyProbability>=70?"#4ade80":pred.flyProbability>=50?"#facc15":"#f87171",fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{pred.flyProbability}% fly</span>
+                    ):(
+                      <button onClick={()=>onPredict(f)}
+                        disabled={loadingPrediction===f.flightNum}
+                        style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:4,padding:"3px 8px",color:"#f97316",fontSize:10,cursor:"pointer",whiteSpace:"nowrap"}}>
+                        {loadingPrediction===f.flightNum?"...":" AI ▸"}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+                {/* FIX: Prediction panel renders immediately below its own row */}
+                {pred&&<PredictionPanel flight={f} prediction={pred}/>}
+              </React.Fragment>
             );
           })}
         </tbody>
       </table>
-    </div>
-  );
-}
-
-function PredictionPanel({flight,prediction}){
-  if(!prediction)return null;
-  const flyColor=prediction.flyProbability>=70?"#4ade80":prediction.flyProbability>=50?"#facc15":"#f87171";
-  return(
-    <div style={{background:"#080f1e",border:"1px solid #1e293b",borderRadius:12,padding:"16px 18px",marginTop:12}}>
-      <div style={{fontSize:9,color:"#475569",letterSpacing:"3px",marginBottom:12}}>▸ AI PREDICTION · {flight.flightNum} · {flight.airlineName}</div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
-        <div style={{background:"#052e16",border:"1px solid #166534",borderRadius:8,padding:12,textAlign:"center"}}>
-          <div style={{fontSize:9,color:"#4ade80",letterSpacing:"2px",marginBottom:4}}>CHANCE OF FLYING</div>
-          <div style={{fontSize:32,fontWeight:"bold",color:flyColor,fontFamily:"'JetBrains Mono',monospace"}}>{prediction.flyProbability}%</div>
-        </div>
-        <div style={{background:"#2d0f0f",border:"1px solid #7f1d1d",borderRadius:8,padding:12,textAlign:"center"}}>
-          <div style={{fontSize:9,color:"#f87171",letterSpacing:"2px",marginBottom:4}}>CHANCE OF CANCEL</div>
-          <div style={{fontSize:32,fontWeight:"bold",color:"#f87171",fontFamily:"'JetBrains Mono',monospace"}}>{prediction.cancelProbability}%</div>
-        </div>
-      </div>
-      <div style={{background:"#030712",borderRadius:4,height:6,overflow:"hidden",marginBottom:14}}>
-        <div style={{height:"100%",width:`${prediction.flyProbability}%`,background:`linear-gradient(90deg,#f97316,${flyColor})`,borderRadius:4,transition:"width 0.8s ease"}}/>
-      </div>
-      <p style={{color:"#94a3b8",fontSize:12,lineHeight:1.7,marginBottom:10}}>{prediction.reasoning}</p>
-      {prediction.riskFactors?.length>0&&(
-        <div style={{marginBottom:10}}>
-          <div style={{fontSize:9,color:"#475569",letterSpacing:"2px",marginBottom:6}}>RISK FACTORS</div>
-          {prediction.riskFactors.map((r,i)=>(
-            <div key={i} style={{color:"#64748b",fontSize:11,marginBottom:3}}>⚠ {r}</div>
-          ))}
-        </div>
-      )}
-      {prediction.recommendation&&(
-        <div style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:6,padding:"8px 12px",fontSize:11,color:"#22d3ee"}}>
-          💡 {prediction.recommendation}
-        </div>
-      )}
-      <div style={{marginTop:8,fontSize:10,color:"#334155"}}>Confidence: {prediction.confidence} · Based on 48h historical data</div>
     </div>
   );
 }
@@ -200,7 +210,6 @@ function EventCard({event,expanded,onToggle}){
   );
 }
 
-// ── MAIN ──────────────────────────────────────────────────────────────
 export default function App(){
   const [originInput,setOriginInput]=useState("DXB");
   const [destInput,setDestInput]=useState("BOM");
@@ -210,13 +219,13 @@ export default function App(){
   const [futureLoading,setFutureLoading]=useState(false);
   const [error,setError]=useState("");
   const [activeTab,setActiveTab]=useState("24h");
-  const [selectedFlight,setSelectedFlight]=useState(null);
   const [predictions,setPredictions]=useState({});
   const [loadingPrediction,setLoadingPrediction]=useState(null);
   const [events,setEvents]=useState([]);
   const [eventsLoading,setEventsLoading]=useState(false);
   const [expandedEvent,setExpandedEvent]=useState(null);
   const [activeView,setActiveView]=useState("search");
+  // FIX: removed selectedFlight state — no longer needed since panels are inline
 
   useEffect(()=>{loadEvents();},[]);
 
@@ -232,13 +241,16 @@ export default function App(){
     const d=destInput.trim().toUpperCase();
     if(o.length!==3||d.length!==3){setError("Enter valid 3-letter IATA codes");return;}
     if(o===d){setError("Origin and destination must differ");return;}
-    setError("");setLoading(true);setResult(null);setFutureFlights([]);setPredictions({});setSelectedFlight(null);setActiveTab("24h");
+    setError("");setLoading(true);setResult(null);setFutureFlights([]);setPredictions({});setActiveTab("24h");
     try{
-      // Fetch 48h history
       const r=await fetch(`${API}/api/routes?origin=${o}&destination=${d}`);
       if(!r.ok){const e=await r.json();throw new Error(e.error||"API error");}
       const data=await r.json();
       setResult(data);
+      // FIX: log debug info to console so you can inspect raw vs matched counts
+      if(data.debug){
+        console.log(`[EscapeRoute] Raw departures: ${data.debug.rawDepartures}, Raw arrivals: ${data.debug.rawArrivals}, Matched: ${data.debug.matched}`);
+      }
     }catch(e){setError(e.message);}
     finally{setLoading(false);}
   },[originInput,destInput]);
@@ -256,11 +268,11 @@ export default function App(){
     finally{setFutureLoading(false);}
   },[originInput,destInput]);
 
+  // FIX: no longer sets selectedFlight — predictions map is the single source of truth
   const handlePredict=async(flight)=>{
     const o=originInput.trim().toUpperCase();
     const d=destInput.trim().toUpperCase();
     setLoadingPrediction(flight.flightNum);
-    setSelectedFlight(flight);
     try{
       const r=await fetch(`${API}/api/predict?origin=${o}&destination=${d}&flightNum=${encodeURIComponent(flight.flightNum)}`);
       const data=await r.json();
@@ -274,7 +286,6 @@ export default function App(){
   const quickPairs=[["DXB","BOM"],["LHR","JFK"],["SIN","SYD"],["IST","CAI"],["DOH","DEL"],["TLV","AMM"]];
   const criticalCount=events.filter(e=>["S4","S5"].includes(e.severity)).length;
 
-  // Stats for display
   const stats=result?.stats;
   const last24h=result?.last24h||[];
   const prev24h=result?.prev24h||[];
@@ -303,7 +314,6 @@ export default function App(){
         }
       `}</style>
 
-      {/* HEADER */}
       <header style={{borderBottom:"1px solid #0f172a",background:"#020817f0",backdropFilter:"blur(16px)",position:"sticky",top:0,zIndex:100}}>
         <div style={{maxWidth:1200,margin:"0 auto",padding:"11px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -329,10 +339,8 @@ export default function App(){
 
       <div style={{maxWidth:1200,margin:"0 auto",padding:"14px 14px"}}>
 
-        {/* ── SEARCH VIEW ── */}
         {activeView==="search"&&(
           <div className="fade-in">
-            {/* Search */}
             <div style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,padding:"16px 18px",marginBottom:16}}>
               <div style={{fontSize:9,color:"#334155",letterSpacing:"3px",marginBottom:12,fontFamily:"'JetBrains Mono',monospace"}}>▸ ROUTE ANALYSIS</div>
               <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
@@ -367,7 +375,6 @@ export default function App(){
 
             {!loading&&result&&(
               <div className="fade-in">
-                {/* Route title + stats */}
                 <div style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,padding:"14px 18px",marginBottom:14}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
                     <div>
@@ -376,7 +383,11 @@ export default function App(){
                         <span style={{color:"#1e293b",margin:"0 8px"}}>→</span>
                         <span style={{color:"#4ade80"}}>{result.destination?.city}</span>
                       </div>
-                      <div style={{fontSize:9,color:"#334155",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{result.origin?.iata} → {result.destination?.iata} · 48H HISTORY</div>
+                      <div style={{fontSize:9,color:"#334155",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>
+                        {result.origin?.iata} → {result.destination?.iata} · 48H HISTORY
+                        {/* FIX: show debug match counts so you can verify data quality */}
+                        {result.debug&&<span style={{marginLeft:10,color:"#1e3a5f"}}>· {result.debug.rawDepartures} dep · {result.debug.rawArrivals} arr · {result.debug.matched} matched</span>}
+                      </div>
                     </div>
                     <div className="stats-flex" style={{display:"flex",gap:14,flexWrap:"wrap"}}>
                       {[
@@ -396,7 +407,6 @@ export default function App(){
                   </div>
                 </div>
 
-                {/* Time window tabs */}
                 <div style={{display:"flex",gap:4,marginBottom:12,overflowX:"auto",paddingBottom:2}}>
                   {[
                     {id:"24h",label:"Last 24h",count:last24h.length},
@@ -417,33 +427,24 @@ export default function App(){
                   ))}
                 </div>
 
-                {/* Last 24h */}
                 {activeTab==="24h"&&(
                   <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
                     <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>
                       ▸ LAST 24H · {last24h.length} FLIGHTS
                     </div>
                     <FlightTable flights={last24h} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
-                    {selectedFlight&&predictions[selectedFlight.flightNum]&&
-                      <div style={{padding:"0 12px 12px"}}><PredictionPanel flight={selectedFlight} prediction={predictions[selectedFlight.flightNum]}/></div>
-                    }
                   </div>
                 )}
 
-                {/* Last 48h (24-48h ago) */}
                 {activeTab==="48h"&&(
                   <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
                     <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>
                       ▸ 24-48H AGO · {prev24h.length} FLIGHTS
                     </div>
                     <FlightTable flights={prev24h} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
-                    {selectedFlight&&predictions[selectedFlight.flightNum]&&
-                      <div style={{padding:"0 12px 12px"}}><PredictionPanel flight={selectedFlight} prediction={predictions[selectedFlight.flightNum]}/></div>
-                    }
                   </div>
                 )}
 
-                {/* Future 24h */}
                 {activeTab==="future"&&(
                   <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
                     <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -461,9 +462,6 @@ export default function App(){
                     ):(
                       <>
                         <FlightTable flights={futureFlights} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
-                        {selectedFlight&&predictions[selectedFlight.flightNum]&&
-                          <div style={{padding:"0 12px 12px"}}><PredictionPanel flight={selectedFlight} prediction={predictions[selectedFlight.flightNum]}/></div>
-                        }
                         <div style={{padding:"10px 14px",borderTop:"1px solid #0f172a",fontSize:10,color:"#1e293b"}}>
                           Scheduled flights sourced from AeroDataBox live schedule data
                         </div>
@@ -472,7 +470,6 @@ export default function App(){
                   </div>
                 )}
 
-                {/* Airlines */}
                 {activeTab==="airlines"&&(
                   <div className="fade-in" style={{display:"grid",gap:10}}>
                     {airlineStats.length===0?(
@@ -513,7 +510,6 @@ export default function App(){
           </div>
         )}
 
-        {/* ── EVENTS VIEW ── */}
         {activeView==="events"&&(
           <div className="fade-in">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:10}}>
