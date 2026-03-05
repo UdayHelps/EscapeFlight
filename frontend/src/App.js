@@ -13,16 +13,18 @@ const CAT_ICONS={Conflict:"⚔️",Airspace:"🚫",Weather:"🌪️",Political:"
 
 function StatusBadge({status}){
   const m={
-    LANDED:{bg:"#052e16",c:"#4ade80",b:"#166534"},
-    CANCELLED:{bg:"#2d0f0f",c:"#f87171",b:"#7f1d1d"},
-    IN_AIR:{bg:"#0c1a40",c:"#60a5fa",b:"#1e3a8a"},
-    SCHEDULED:{bg:"#0f172a",c:"#94a3b8",b:"#334155"},
-    DELAYED:{bg:"#2d1f00",c:"#fbbf24",b:"#78350f"},
-    BOARDING:{bg:"#1a0f2e",c:"#c084fc",b:"#6b21a8"},
-    DIVERTED:{bg:"#1f1000",c:"#fb923c",b:"#c2410c"},
+    LANDED:    {bg:"#052e16",c:"#4ade80",b:"#166534"},
+    COMPLETED: {bg:"#052e16",c:"#4ade80",b:"#166534"},
+    CANCELLED: {bg:"#2d0f0f",c:"#f87171",b:"#7f1d1d"},
+    IN_AIR:    {bg:"#0c1a40",c:"#60a5fa",b:"#1e3a8a"},
+    SCHEDULED: {bg:"#0f172a",c:"#94a3b8",b:"#334155"},
+    DELAYED:   {bg:"#2d1f00",c:"#fbbf24",b:"#78350f"},
+    BOARDING:  {bg:"#1a0f2e",c:"#c084fc",b:"#6b21a8"},
+    DIVERTED:  {bg:"#1f1000",c:"#fb923c",b:"#c2410c"},
   };
   const s=m[status]||m.SCHEDULED;
-  return <span style={{background:s.bg,color:s.c,border:`1px solid ${s.b}`,fontSize:9,padding:"2px 7px",borderRadius:3,fontWeight:"bold",letterSpacing:"1px",whiteSpace:"nowrap"}}>{status}</span>;
+  const label=status==="COMPLETED"?"OPERATED":status;
+  return <span style={{background:s.bg,color:s.c,border:`1px solid ${s.b}`,fontSize:9,padding:"2px 7px",borderRadius:3,fontWeight:"bold",letterSpacing:"1px",whiteSpace:"nowrap"}}>{label}</span>;
 }
 
 function AirportInput({label,value,onChange,color}){
@@ -140,23 +142,48 @@ function FlightTable({flights}){
   );
 }
 
-// Future table — has predict button since these are actionable upcoming flights
-function FutureFlightTable({flights,onPredict,predictions,loadingPrediction}){
+// Compact auto-prediction row — no click needed, shows below each future flight
+function PredictionMini({score}){
+  if(!score)return null;
+  const c=score.flyProbability>=75?"#4ade80":score.flyProbability>=50?"#facc15":"#f87171";
+  return(
+    <tr>
+      <td colSpan={7} style={{padding:"0 12px 8px",background:"#040a14"}}>
+        <div style={{background:"#080f1e",border:"1px solid #1a2a1a",borderRadius:8,padding:"8px 14px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:80,height:5,background:"#0f172a",borderRadius:3,overflow:"hidden"}}>
+              <div style={{width:`${score.flyProbability}%`,height:"100%",background:c,borderRadius:3,transition:"width 0.6s ease"}}/>
+            </div>
+            <span style={{color:c,fontSize:11,fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{score.flyProbability}% fly</span>
+            <span style={{color:"#f87171",fontSize:11,fontFamily:"'JetBrains Mono',monospace"}}>{score.cancelProbability}% cancel</span>
+          </div>
+          <span style={{color:"#334155",fontSize:10}}>Based on {score.basedOn} · {score.confidence} confidence</span>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// Future table — fly % shown automatically from server-computed scores, no button needed
+function FutureFlightTable({flights,flyScores}){
   if(!flights||flights.length===0)
     return <div style={{padding:40,textAlign:"center",color:"#334155",fontSize:12}}>No upcoming flights found.</div>;
+  const scoreMap=Object.fromEntries((flyScores||[]).map(s=>[s.flightNum,s]));
   return(
     <div style={{overflowX:"auto"}}>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:500}}>
         <thead>
           <tr style={{borderBottom:"1px solid #0f172a"}}>
-            {["FLIGHT","AIRLINE","DEP","ARR","AIRCRAFT","STATUS","PREDICT"].map(h=>(
+            {["FLIGHT","AIRLINE","DEP","ARR","AIRCRAFT","STATUS","FLY %"].map(h=>(
               <th key={h} style={{padding:"9px 12px",textAlign:"left",color:"#334155",fontSize:9,letterSpacing:"2px",fontWeight:"normal",whiteSpace:"nowrap"}}>{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {flights.map((f,i)=>{
-            const pred=predictions[f.flightNum];
+            const score=scoreMap[f.flightNum];
+            const pct=score?.flyProbability;
+            const pctColor=pct>=75?"#4ade80":pct>=50?"#facc15":"#f87171";
             return(
               <React.Fragment key={`${f.flightNum}-${i}`}>
                 <tr style={{borderBottom:"1px solid #0f172a44",background:i%2===0?"#080f1e":"#040a14"}}
@@ -169,18 +196,18 @@ function FutureFlightTable({flights,onPredict,predictions,loadingPrediction}){
                   <td style={{padding:"9px 12px",color:"#475569",fontSize:10,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.aircraft||"—"}</td>
                   <td style={{padding:"9px 12px",whiteSpace:"nowrap"}}><StatusBadge status={f.status}/></td>
                   <td style={{padding:"9px 12px"}}>
-                    {pred?(
-                      <span style={{fontSize:11,color:pred.flyProbability>=70?"#4ade80":pred.flyProbability>=50?"#facc15":"#f87171",fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{pred.flyProbability}%</span>
-                    ):(
-                      <button onClick={()=>onPredict(f)}
-                        disabled={loadingPrediction===f.flightNum}
-                        style={{background:"#0f172a",border:"1px solid #f97316",borderRadius:4,padding:"3px 10px",color:"#f97316",fontSize:10,cursor:"pointer",whiteSpace:"nowrap",opacity:loadingPrediction===f.flightNum?0.5:1}}>
-                        {loadingPrediction===f.flightNum?"...":"PREDICT"}
-                      </button>
-                    )}
+                    {pct!=null?(
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <span style={{fontSize:12,fontWeight:"bold",color:pctColor,fontFamily:"'JetBrains Mono',monospace"}}>{pct}%</span>
+                        <div style={{width:36,height:4,background:"#0f172a",borderRadius:2,overflow:"hidden"}}>
+                          <div style={{width:`${pct}%`,height:"100%",background:pctColor,borderRadius:2}}/>
+                        </div>
+                        {score.confidence==="low"&&<span style={{fontSize:9,color:"#334155"}}>~</span>}
+                      </div>
+                    ):<span style={{color:"#334155",fontSize:10}}>—</span>}
                   </td>
                 </tr>
-                {pred&&<PredictionPanel flight={f} prediction={pred}/>}
+                {score&&<PredictionMini score={score}/>}
               </React.Fragment>
             );
           })}
@@ -245,12 +272,11 @@ export default function App(){
   const [futureLoading,setFutureLoading]=useState(false);
   const [error,setError]=useState("");
   const [activeTab,setActiveTab]=useState("24h");
-  const [predictions,setPredictions]=useState({});
-  const [loadingPrediction,setLoadingPrediction]=useState(null);
+  const [flyScores,setFlyScores]=useState([]);
+  const [bragging,setBragging]=useState({flightsTracked:0,cancellationsCaught:0,routesScanned:0});
   const [events,setEvents]=useState([]);
   const [eventsLoading,setEventsLoading]=useState(false);
   const [expandedEvent,setExpandedEvent]=useState(null);
-  const [activeView,setActiveView]=useState("search");
   // FIX: removed selectedFlight state — no longer needed since panels are inline
 
   useEffect(()=>{loadEvents();},[]);
@@ -267,13 +293,17 @@ export default function App(){
     const d=destInput.trim().toUpperCase();
     if(o.length!==3||d.length!==3){setError("Enter valid 3-letter IATA codes");return;}
     if(o===d){setError("Origin and destination must differ");return;}
-    setError("");setLoading(true);setResult(null);setFutureFlights([]);setPredictions({});setActiveTab("24h");
+    setError("");setLoading(true);setResult(null);setFutureFlights([]);setFlyScores([]);setActiveTab("24h");
     try{
       const r=await fetch(`${API}/api/routes?origin=${o}&destination=${d}`);
       if(!r.ok){const e=await r.json();throw new Error(e.error||"API error");}
       const data=await r.json();
       setResult(data);
-      // FIX: log debug info to console so you can inspect raw vs matched counts
+      setBragging(prev=>({
+        flightsTracked:    prev.flightsTracked    + (data.stats?.total||0),
+        cancellationsCaught: prev.cancellationsCaught + (data.stats?.cancelled||0),
+        routesScanned:     prev.routesScanned     + 1,
+      }));
       if(data.debug){
         console.log(`[EscapeRoute] Raw departures: ${data.debug.rawDepartures}, Raw arrivals: ${data.debug.rawArrivals}, Matched: ${data.debug.matched}`);
       }
@@ -290,6 +320,7 @@ export default function App(){
       const r=await fetch(`${API}/api/future?origin=${o}&destination=${d}`);
       const data=await r.json();
       setFutureFlights(data.flights||[]);
+      setFlyScores(data.flyScores||[]);
     }catch(e){console.error(e);}
     finally{setFutureLoading(false);}
   },[originInput,destInput]);
@@ -309,13 +340,10 @@ export default function App(){
     finally{setLoadingPrediction(null);}
   };
 
-  const quickPairs=[["DXB","BOM"],["LHR","JFK"],["SIN","SYD"],["IST","CAI"],["DOH","DEL"],["TLV","AMM"]];
-  const criticalCount=events.filter(e=>["S4","S5"].includes(e.severity)).length;
-
   const stats=result?.stats;
   const last24h=result?.last24h||[];
-  const prev24h=result?.prev24h||[];
   const airlineStats=result?.airlineStats||[];
+  const quickPairs=[["DXB","BOM"],["LHR","JFK"],["SIN","SYD"],["IST","CAI"],["DOH","DEL"],["TLV","AMM"]];
 
   return(
     <div style={{minHeight:"100vh",background:"#020817",color:"#e2e8f0"}}>
@@ -347,14 +375,11 @@ export default function App(){
             <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,letterSpacing:"-0.5px",color:"#f1f5f9"}}>ESCAPE<span style={{color:"#f97316"}}>ROUTE</span></div>
           </div>
           <div style={{display:"flex",gap:4}}>
-            {[{id:"search",icon:"✈",label:"Routes"},{id:"events",icon:"🌍",label:"Events",badge:criticalCount}].map(tab=>(
-              <button key={tab.id} onClick={()=>setActiveView(tab.id)}
-                style={{background:activeView===tab.id?"#1e293b":"transparent",border:`1px solid ${activeView===tab.id?"#f97316":"#1e293b"}`,borderRadius:7,padding:"6px 12px",color:activeView===tab.id?"#f97316":"#64748b",fontSize:12,display:"flex",alignItems:"center",gap:5,transition:"all 0.2s",position:"relative"}}>
-                <span>{tab.icon}</span>
-                <span className="tab-label">{tab.label}</span>
-                {tab.badge>0&&<span style={{background:"#dc2626",color:"#fff",fontSize:9,borderRadius:"50%",width:15,height:15,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:"bold"}}>{tab.badge}</span>}
-              </button>
-            ))}
+            <button onClick={()=>setActiveView("search")}
+              style={{background:"#1e293b",border:"1px solid #f97316",borderRadius:7,padding:"6px 12px",color:"#f97316",fontSize:12,display:"flex",alignItems:"center",gap:5}}>
+              <span>✈</span>
+              <span className="tab-label">Routes</span>
+            </button>
           </div>
           <span style={{display:"flex",alignItems:"center",gap:5,color:"#334155",fontSize:10,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>
             <span className="pulse-dot" style={{width:5,height:5,borderRadius:"50%",background:"#4ade80",display:"inline-block",flexShrink:0}}/>
@@ -363,10 +388,9 @@ export default function App(){
         </div>
       </header>
 
-      <div style={{maxWidth:1200,margin:"0 auto",padding:"14px 14px"}}>
+      <div style={{maxWidth:1200,margin:"0 auto",padding:"14px 14px",paddingBottom:bragging.flightsTracked>0?"80px":"14px"}}>
 
-        {activeView==="search"&&(
-          <div className="fade-in">
+        <div className="fade-in">
             <div style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,padding:"16px 18px",marginBottom:16}}>
               <div style={{fontSize:9,color:"#334155",letterSpacing:"3px",marginBottom:12,fontFamily:"'JetBrains Mono',monospace"}}>▸ ROUTE ANALYSIS</div>
               <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
@@ -375,7 +399,7 @@ export default function App(){
                 <AirportInput label="DESTINATION" value={destInput} onChange={setDestInput} color="#4ade80"/>
                 <button onClick={handleSearch} disabled={loading}
                   style={{background:loading?"#1e293b":"linear-gradient(135deg,#f97316,#dc2626)",border:"none",borderRadius:8,padding:"11px 22px",color:"#fff",fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold",letterSpacing:"2px",whiteSpace:"nowrap",alignSelf:"flex-end",opacity:loading?0.6:1}}>
-                  {loading?"SCANNING...":"FIND ROUTES ▸"}
+                  {loading?"SCANNING...":"CHECK FLIGHTS ▸"}
                 </button>
               </div>
               {error&&<div style={{marginTop:10,color:"#f87171",fontSize:12,background:"#2d0f0f",padding:"8px 12px",borderRadius:6,border:"1px solid #7f1d1d"}}>⚠ {error}</div>}
@@ -419,7 +443,7 @@ export default function App(){
                       {[
                         {l:"SUCCESS",v:`${stats?.successRate||0}%`,c:stats?.successRate>=75?"#4ade80":stats?.successRate>=50?"#facc15":"#f87171"},
                         {l:"TOTAL",v:stats?.total||0,c:"#94a3b8"},
-                        {l:"LANDED",v:stats?.landed||0,c:"#4ade80"},
+                        {l:"LANDED",v:(stats?.landed||0)+(stats?.completed||0),c:"#4ade80"},
                         {l:"IN AIR",v:stats?.inAir||0,c:"#60a5fa"},
                         {l:"CANCEL",v:stats?.cancelled||0,c:"#f87171"},
                         {l:"DELAYED",v:stats?.delayed||0,c:"#fbbf24"},
@@ -477,7 +501,7 @@ export default function App(){
                       </div>
                     ):(
                       <>
-                        <FutureFlightTable flights={futureFlights} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
+                        <FutureFlightTable flights={futureFlights} flyScores={flyScores}/>
                         <div style={{padding:"10px 14px",borderTop:"1px solid #0f172a",fontSize:10,color:"#1e293b"}}>
                           Scheduled flights from AeroDataBox · next 24h
                         </div>
@@ -523,82 +547,87 @@ export default function App(){
                 <div style={{fontSize:11,letterSpacing:"4px",color:"#1e293b",fontFamily:"'JetBrains Mono',monospace"}}>ENTER A ROUTE TO BEGIN</div>
               </div>
             )}
-          </div>
-        )}
 
-        {activeView==="events"&&(
-          <div className="fade-in">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:10}}>
-              <div>
-                <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,color:"#f1f5f9"}}>WORLD EVENT FEED</div>
-                <div style={{fontSize:9,color:"#334155",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>LIVE NEWS · AI-ASSESSED · AVIATION IMPACT</div>
+            {/* ── WORLD EVENTS — always visible below flight data ── */}
+            <div style={{marginTop:24}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+                <div>
+                  <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15,color:"#f1f5f9"}}>WORLD EVENT FEED</div>
+                  <div style={{fontSize:9,color:"#334155",marginTop:2,fontFamily:"'JetBrains Mono',monospace"}}>LIVE NEWS · AI-ASSESSED · AVIATION IMPACT</div>
+                </div>
+                <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                  {["S1","S2","S3","S4","S5"].map(s=>{
+                    const sv=SEVERITY[s];
+                    const count=events.filter(e=>e.severity===s).length;
+                    if(count===0)return null;
+                    return(
+                      <div key={s} style={{display:"flex",alignItems:"center",gap:3}}>
+                        <span style={{background:sv.bg,color:sv.color,border:`1px solid ${sv.border}`,fontSize:9,padding:"1px 5px",borderRadius:3,fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{s}</span>
+                        <span style={{color:"#334155",fontSize:10}}>{count}</span>
+                      </div>
+                    );
+                  })}
+                  <button onClick={loadEvents} disabled={eventsLoading}
+                    style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:6,padding:"4px 10px",color:"#475569",fontSize:10,cursor:"pointer"}}
+                    onMouseEnter={e=>{e.target.style.color="#f97316";e.target.style.borderColor="#f97316"}}
+                    onMouseLeave={e=>{e.target.style.color="#475569";e.target.style.borderColor="#0f172a"}}>
+                    {eventsLoading?"loading...":"↻ refresh"}
+                  </button>
+                </div>
               </div>
-              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-                {["S1","S2","S3","S4","S5"].map(s=>{
-                  const sv=SEVERITY[s];
-                  const count=events.filter(e=>e.severity===s).length;
-                  return(
-                    <div key={s} style={{display:"flex",alignItems:"center",gap:3}}>
-                      <span style={{background:sv.bg,color:sv.color,border:`1px solid ${sv.border}`,fontSize:9,padding:"1px 5px",borderRadius:3,fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{s}</span>
-                      <span style={{color:"#334155",fontSize:10}}>{count}</span>
-                    </div>
-                  );
-                })}
-                <button onClick={loadEvents} disabled={eventsLoading}
-                  style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:6,padding:"5px 10px",color:"#475569",fontSize:10}}
-                  onMouseEnter={e=>{e.target.style.color="#f97316";e.target.style.borderColor="#f97316"}}
-                  onMouseLeave={e=>{e.target.style.color="#475569";e.target.style.borderColor="#0f172a"}}>
-                  {eventsLoading?"loading...":"↻ refresh"}
-                </button>
-              </div>
+
+              {eventsLoading&&(
+                <div style={{textAlign:"center",padding:"30px 20px"}}>
+                  <div style={{width:28,height:28,border:"3px solid #0f172a",borderTop:"3px solid #f97316",borderRadius:"50%",margin:"0 auto 10px",animation:"spin 0.8s linear infinite"}}/>
+                  <div style={{fontSize:10,color:"#334155",letterSpacing:"2px",fontFamily:"'JetBrains Mono',monospace"}}>AI ANALYSING LIVE NEWS<span className="blink">_</span></div>
+                </div>
+              )}
+
+              {!eventsLoading&&events.length>0&&(
+                <div style={{display:"grid",gap:0}}>
+                  {/* Critical/High first */}
+                  {events.filter(e=>["S4","S5"].includes(e.severity)).map(ev=>(
+                    <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
+                  ))}
+                  {/* Then moderate */}
+                  {events.filter(e=>e.severity==="S3").map(ev=>(
+                    <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
+                  ))}
+                  {/* Then monitor/low — collapsed by default, show as a subtle group */}
+                  {events.filter(e=>["S1","S2"].includes(e.severity)).map(ev=>(
+                    <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
+                  ))}
+                </div>
+              )}
+
+              {!eventsLoading&&events.length===0&&(
+                <div style={{textAlign:"center",padding:"30px 20px",background:"#080f1e",border:"1px solid #0f172a",borderRadius:12}}>
+                  <div style={{fontSize:24,marginBottom:8}}>🌍</div>
+                  <button onClick={loadEvents} style={{background:"transparent",border:"1px solid #f97316",borderRadius:7,padding:"6px 16px",color:"#f97316",fontSize:11,cursor:"pointer"}}>LOAD EVENTS</button>
+                </div>
+              )}
             </div>
-
-            {eventsLoading&&(
-              <div style={{textAlign:"center",padding:"60px 20px"}}>
-                <div style={{width:32,height:32,border:"3px solid #0f172a",borderTop:"3px solid #f97316",borderRadius:"50%",margin:"0 auto 14px",animation:"spin 0.8s linear infinite"}}/>
-                <div style={{fontSize:10,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>AI ANALYSING LIVE NEWS<span className="blink">_</span></div>
-              </div>
-            )}
-
-            {!eventsLoading&&events.length>0&&(
-              <div>
-                {["S5","S4"].some(s=>events.find(e=>e.severity===s))&&(
-                  <div style={{marginBottom:18}}>
-                    <div style={{fontSize:9,color:"#f87171",letterSpacing:"3px",marginBottom:10,fontFamily:"'JetBrains Mono',monospace"}}>▸ CRITICAL / HIGH</div>
-                    {events.filter(e=>["S4","S5"].includes(e.severity)).map(ev=>(
-                      <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
-                    ))}
-                  </div>
-                )}
-                {events.filter(e=>e.severity==="S3").length>0&&(
-                  <div style={{marginBottom:18}}>
-                    <div style={{fontSize:9,color:"#facc15",letterSpacing:"3px",marginBottom:10,fontFamily:"'JetBrains Mono',monospace"}}>▸ MODERATE</div>
-                    {events.filter(e=>e.severity==="S3").map(ev=>(
-                      <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
-                    ))}
-                  </div>
-                )}
-                {events.filter(e=>["S1","S2"].includes(e.severity)).length>0&&(
-                  <div>
-                    <div style={{fontSize:9,color:"#475569",letterSpacing:"3px",marginBottom:10,fontFamily:"'JetBrains Mono',monospace"}}>▸ MONITOR</div>
-                    {events.filter(e=>["S1","S2"].includes(e.severity)).map(ev=>(
-                      <EventCard key={ev.id} event={ev} expanded={expandedEvent===ev.id} onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {!eventsLoading&&events.length===0&&(
-              <div style={{textAlign:"center",padding:"60px 20px"}}>
-                <div style={{fontSize:36,marginBottom:12}}>🌍</div>
-                <div style={{fontSize:11,color:"#1e293b",fontFamily:"'JetBrains Mono',monospace",letterSpacing:"2px"}}>NO EVENTS LOADED</div>
-                <button onClick={loadEvents} style={{marginTop:14,background:"#080f1e",border:"1px solid #f97316",borderRadius:7,padding:"8px 18px",color:"#f97316",fontSize:11}}>LOAD EVENTS</button>
-              </div>
-            )}
           </div>
-        )}
-      </div>
+        </div>
+
+      {/* ── BRAG BAR ── */}
+      {bragging.flightsTracked>0&&(
+        <div style={{borderTop:"1px solid #0f172a",background:"#020817f0",backdropFilter:"blur(16px)",position:"fixed",bottom:0,left:0,right:0,zIndex:100}}>
+          <div style={{maxWidth:1200,margin:"0 auto",padding:"10px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:32,flexWrap:"wrap"}}>
+            {[
+              {icon:"✈",value:bragging.flightsTracked.toLocaleString(),label:"FLIGHTS TRACKED"},
+              {icon:"🚫",value:bragging.cancellationsCaught.toLocaleString(),label:"CANCELLATIONS CAUGHT"},
+              {icon:"🛫",value:bragging.routesScanned.toLocaleString(),label:"ROUTES SCANNED"},
+            ].map(s=>(
+              <div key={s.label} style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:14}}>{s.icon}</span>
+                <span style={{fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold",fontSize:16,color:"#f97316"}}>{s.value}</span>
+                <span style={{fontSize:9,color:"#334155",letterSpacing:"2px"}}>{s.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
