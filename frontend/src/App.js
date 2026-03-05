@@ -571,14 +571,7 @@ export default function App(){
             </div>
           )}
 
-          {/* ── EMPTY STATE ── */}
-          {!loading&&!result&&(
-            <div style={{textAlign:"center",padding:"50px 20px"}}>
-              <div style={{fontSize:44,marginBottom:10,opacity:0.12}}>✈</div>
-              <div style={{fontSize:11,letterSpacing:"3px",color:T.textDim2,
-                fontFamily:"'JetBrains Mono',monospace"}}>ENTER A ROUTE TO BEGIN</div>
-            </div>
-          )}
+
 
           {/* ── WORLD EVENTS ── */}
           <div style={{marginTop:24}}>
@@ -688,6 +681,15 @@ export default function App(){
               </div>
               <p style={{textAlign:"center",marginTop:14,fontSize:11,color:T.textDim,lineHeight:1.5}}>
                 Live data via AeroDataBox · AI by Groq
+              </p>
+              <p style={{textAlign:"center",marginTop:8,fontSize:11,color:T.textDim,lineHeight:1.5}}>
+                Made with ❤️ by{" "}
+                <a href="https://www.linkedin.com/in/udaykatare" target="_blank" rel="noopener noreferrer"
+                  style={{color:T.accent,textDecoration:"none",fontWeight:600}}
+                  onMouseEnter={e=>e.currentTarget.style.opacity="0.7"}
+                  onMouseLeave={e=>e.currentTarget.style.opacity="1"}>
+                  Uday
+                </a>
               </p>
             </div>
           )}
