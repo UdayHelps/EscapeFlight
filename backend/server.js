@@ -12,14 +12,35 @@ const RAPIDAPI_HOST = "aerodatabox.p.rapidapi.com";
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
 
+// ── Quota tracker ─────────────────────────────────────────────────────
+// Pro plan: 24,000 units/month. Airport schedule = Tier 2 = 2 units/call.
+const QUOTA = {
+  MONTHLY_UNIT_LIMIT: 24000,
+  TIER2_COST: 2,
+  TIER3_COST: 6,
+  used: 0,
+};
+function trackUsage(tier = 2) {
+  const cost = tier === 3 ? QUOTA.TIER3_COST : QUOTA.TIER2_COST;
+  QUOTA.used += cost;
+  console.log(`[Quota] +${cost} units (Tier ${tier}) | Session total: ${QUOTA.used} | Remaining: ~${QUOTA.MONTHLY_UNIT_LIMIT - QUOTA.used}`);
+}
+function quotaOk(tier = 2) {
+  const cost = tier === 3 ? QUOTA.TIER3_COST : QUOTA.TIER2_COST;
+  return (QUOTA.MONTHLY_UNIT_LIMIT - QUOTA.used) >= cost;
+}
+
 // ── Cache ─────────────────────────────────────────────────────────────
 const cache = new Map();
-function getCached(key, ttlMs = 15 * 60 * 1000) {
+function getCached(key, ttlMs) {
   const e = cache.get(key);
   if (e && Date.now() - e.ts < ttlMs) return e.data;
   return null;
 }
 function setCache(key, data) { cache.set(key, { data, ts: Date.now() }); }
+
+const HISTORICAL_TTL = 30 * 60 * 1000; // 30 min — past flights won't change
+const LIVE_TTL       = 10 * 60 * 1000; // 10 min — future/live data
 
 // ── Airport DB ────────────────────────────────────────────────────────
 let AIRPORT_DB = {};
@@ -34,15 +55,15 @@ async function loadAirportDB() {
     );
     const lines = resp.data.split("\n");
     for (let i = 1; i < lines.length; i++) {
-      const row = parseCSVLine(lines[i]);
+      const row     = parseCSVLine(lines[i]);
       if (!row || row.length < 14) continue;
-      const iata = row[13]?.replace(/"/g, "").trim();
-      const icao = row[1]?.replace(/"/g, "").trim();
-      const type = row[2]?.replace(/"/g, "").trim();
-      const name = row[3]?.replace(/"/g, "").trim();
-      const lat = parseFloat(row[4]);
-      const lon = parseFloat(row[5]);
-      const city = row[10]?.replace(/"/g, "").trim();
+      const iata    = row[13]?.replace(/"/g, "").trim();
+      const icao    = row[1]?.replace(/"/g, "").trim();
+      const type    = row[2]?.replace(/"/g, "").trim();
+      const name    = row[3]?.replace(/"/g, "").trim();
+      const lat     = parseFloat(row[4]);
+      const lon     = parseFloat(row[5]);
+      const city    = row[10]?.replace(/"/g, "").trim();
       const country = row[8]?.replace(/"/g, "").trim();
       if (iata && iata.length === 3 && icao && !isNaN(lat) && !isNaN(lon)) {
         AIRPORT_DB[iata] = { iata, icao, name, lat, lon, city, country, type };
@@ -105,80 +126,84 @@ function loadFallbackAirports() {
   DB_LOADED = true;
 }
 
-// ── AeroDataBox single window fetch ───────────────────────────────────
-// FIX: direction param must be "Arrival" or "Departure" (capital first letter)
-// FIX: parse both resp.data.arrivals AND resp.data.departures depending on direction
-async function fetchWindow(icao, direction, fromDate, toDate) {
-  const fmt = d => d.toISOString().slice(0, 16);
-  const cacheKey = `${icao}-${direction}-${fmt(fromDate)}-${fmt(toDate)}`;
-  const cached = getCached(cacheKey);
-  if (cached) return cached;
+// ── Core fetch — single window, max 12h, Tier 2 = 2 units ────────────
+async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = true) {
+  const fmt        = d => d.toISOString().slice(0, 16);
+  const cacheKey   = `${icao}-${direction}-${fmt(fromDate)}-${fmt(toDate)}`;
+  const ttl        = isHistorical ? HISTORICAL_TTL : LIVE_TTL;
+  const cached     = getCached(cacheKey, ttl);
+  if (cached) {
+    console.log(`[Cache HIT] ${cacheKey}`);
+    return cached;
+  }
+
+  if (!quotaOk(2)) {
+    console.warn(`[Quota GUARD] Not enough units for ${cacheKey} — returning empty`);
+    return [];
+  }
 
   const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmt(fromDate)}/${fmt(toDate)}`;
   try {
     const resp = await axios.get(url, {
       params: {
-        withLeg: "true",
+        withLeg:        "true",
         direction,
-        withCancelled: "true",
+        withCancelled:  "true",
         withCodeshared: "false",
-        withCargo: "false",
-        withPrivate: "false",
-        withLocation: "false",
+        withCargo:      "false",
+        withPrivate:    "false",
+        withLocation:   "false",
       },
       headers: { "x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST },
-      timeout: 15000,
+      timeout: 20000,
     });
 
-    // AeroDataBox returns { arrivals: [...] } or { departures: [...] } based on direction
+    trackUsage(2);
+
     let data = [];
-    if (direction === "Arrival" && resp.data?.arrivals) {
-      data = resp.data.arrivals;
-    } else if (direction === "Departure" && resp.data?.departures) {
-      data = resp.data.departures;
-    } else {
-      // Fallback: grab whichever key exists
-      data = resp.data?.arrivals || resp.data?.departures || [];
-    }
+    if (direction === "Arrival"   && resp.data?.arrivals)   data = resp.data.arrivals;
+    else if (direction === "Departure" && resp.data?.departures) data = resp.data.departures;
+    else data = resp.data?.arrivals || resp.data?.departures || [];
 
     console.log(`[ADB] ${icao} ${direction} ${fmt(fromDate)}→${fmt(toDate)}: ${data.length} flights`);
     setCache(cacheKey, data);
     return data;
   } catch (e) {
-    console.error(`[ADB] ${icao} ${direction}: ${e.response?.status} ${e.message}`);
-    if (e.response?.data) console.error("[ADB] Response:", JSON.stringify(e.response.data).slice(0, 300));
+    console.error(`[ADB ERROR] ${icao} ${direction}: HTTP ${e.response?.status} — ${e.message}`);
+    if (e.response?.data) console.error("[ADB Body]", JSON.stringify(e.response.data).slice(0, 400));
     return [];
   }
 }
 
-// ── Fetch a time range, splitting into ≤11h chunks (safe margin under 12h limit) ──
-async function fetchTimeRange(icao, direction, hoursAgo, hoursAhead) {
-  const now = new Date();
-  const from = new Date(now.getTime() - hoursAgo * 3600000);
-  const to = new Date(now.getTime() + hoursAhead * 3600000);
+// ── Fetch range in 11.5h chunks ───────────────────────────────────────
+// Pro tip: for 24h we get exactly 2 chunks = 2 calls per airport = 4 calls total = 8 units
+// Do NOT use 48h — that doubles to 16 units per search
+async function fetchTimeRange(icao, direction, hoursAgo, hoursAhead, isHistorical = true) {
+  const now    = new Date();
+  const from   = new Date(now.getTime() - hoursAgo   * 3600000);
+  const to     = new Date(now.getTime() + hoursAhead * 3600000);
+  const CHUNK  = 11.5 * 3600000; // just under 12h limit
+  const totalH = (to - from) / 3600000;
 
-  const CHUNK_HOURS = 11; // stay safely under AeroDataBox's 12h max
-  const totalMs = to.getTime() - from.getTime();
-  const totalHours = totalMs / 3600000;
-
-  if (totalHours <= CHUNK_HOURS) {
-    return fetchWindow(icao, direction, from, to);
+  if (totalH <= 11.5) {
+    return fetchWindow(icao, direction, from, to, isHistorical);
   }
 
-  // Split into non-overlapping chunks
   const windows = [];
   let cursor = from;
   while (cursor < to) {
-    const windowEnd = new Date(Math.min(cursor.getTime() + CHUNK_HOURS * 3600000, to.getTime()));
-    windows.push(fetchWindow(icao, direction, cursor, windowEnd));
-    cursor = new Date(windowEnd.getTime() + 1); // +1ms to avoid overlap
+    const end = new Date(Math.min(cursor.getTime() + CHUNK, to.getTime()));
+    windows.push({ from: new Date(cursor), to: end });
+    cursor = new Date(end.getTime() + 60000); // 1min gap prevents overlap
   }
 
-  const results = await Promise.all(windows);
+  console.log(`[ADB] ${totalH.toFixed(0)}h split into ${windows.length} windows for ${icao} — ~${windows.length * 2} units`);
 
-  // Deduplicate by flight number
-  const seen = new Set();
-  const all = [];
+  const results = await Promise.all(
+    windows.map(w => fetchWindow(icao, direction, w.from, w.to, isHistorical))
+  );
+
+  const seen = new Set(), all = [];
   results.flat().forEach(f => {
     const key = f.number || f.callSign;
     if (key && !seen.has(key)) { seen.add(key); all.push(f); }
@@ -186,125 +211,92 @@ async function fetchTimeRange(icao, direction, hoursAgo, hoursAhead) {
   return all;
 }
 
-// ── FIX: Improved flight mapper ───────────────────────────────────────
+// ── Status mapper ─────────────────────────────────────────────────────
+function mapStatus(s) {
+  if (!s) return "SCHEDULED";
+  const l = s.toLowerCase().replace(/[\s_\-]/g, "");
+  if (l === "landed" || l === "arrived")                                  return "LANDED";
+  if (l === "cancelled" || l === "canceled")                              return "CANCELLED";
+  if (["enroute","airborne","departed","inflightx","active"].includes(l)) return "IN_AIR";
+  if (l.includes("delay"))                                                return "DELAYED";
+  if (l === "diverted")                                                   return "DIVERTED";
+  if (["boarding","gateclosed","taxiing","gateopen"].includes(l))         return "BOARDING";
+  if (l.includes("land") || l.includes("arriv"))                         return "LANDED";
+  if (l.includes("cancel"))                                               return "CANCELLED";
+  if (l.includes("air") || l.includes("route") || l.includes("depart"))  return "IN_AIR";
+  return "SCHEDULED";
+}
+
+// ── Flight mapper ─────────────────────────────────────────────────────
 function mapFlight(f, impliedDep, impliedArr) {
-  const flightNum = f.number || f.callSign || "N/A";
+  const flightNum   = f.number || f.callSign || "N/A";
   const airlineName = f.airline?.name || "Unknown";
   const airlineCode = f.airline?.iata || (flightNum.length >= 2 ? flightNum.slice(0, 2) : "??");
-
-  const depAirport = f.departure?.airport?.iata || impliedDep || "?";
-  const arrAirport = f.arrival?.airport?.iata || impliedArr || "?";
-
-  // Prefer local times, fall back to UTC
-  const depLocal = f.departure?.revisedTime?.local || f.departure?.scheduledTime?.local;
-  const depUTC   = f.departure?.revisedTime?.utc   || f.departure?.scheduledTime?.utc;
-  const arrLocal = f.arrival?.revisedTime?.local   || f.arrival?.scheduledTime?.local;
-  const arrUTC   = f.arrival?.revisedTime?.utc     || f.arrival?.scheduledTime?.utc;
-
-  const depTime = (depLocal || depUTC || "")?.slice(11, 16) || "--:--";
-  const arrTime = (arrLocal || arrUTC || "")?.slice(11, 16) || "--:--";
-  const depDate = (depLocal || depUTC || "")?.slice(0, 10) || null;
-
+  const depAirport  = f.departure?.airport?.iata || impliedDep || "?";
+  const arrAirport  = f.arrival?.airport?.iata   || impliedArr || "?";
+  const depTime     = (f.departure?.revisedTime?.local || f.departure?.scheduledTime?.local
+                    || f.departure?.revisedTime?.utc   || f.departure?.scheduledTime?.utc || "")?.slice(11,16) || "--:--";
+  const arrTime     = (f.arrival?.revisedTime?.local   || f.arrival?.scheduledTime?.local
+                    || f.arrival?.revisedTime?.utc     || f.arrival?.scheduledTime?.utc   || "")?.slice(11,16) || "--:--";
+  const depDate     = (f.departure?.revisedTime?.local || f.departure?.scheduledTime?.local
+                    || f.departure?.revisedTime?.utc   || f.departure?.scheduledTime?.utc || "")?.slice(0,10) || null;
   return {
     flightNum, airlineCode, airlineName, depTime, arrTime, depDate,
     depAirport, arrAirport,
     depAirportName: f.departure?.airport?.name || AIRPORT_DB[depAirport]?.city || depAirport,
     arrAirportName: f.arrival?.airport?.name   || AIRPORT_DB[arrAirport]?.city || arrAirport,
-    status: mapStatus(f.status),
+    status:   mapStatus(f.status),
     aircraft: f.aircraft?.model || f.aircraft?.reg || null,
-    terminal: f.arrival?.terminal || f.departure?.terminal || null,
-    gate:     f.arrival?.gate     || f.departure?.gate     || null,
+    terminal: f.arrival?.terminal  || f.departure?.terminal || null,
+    gate:     f.arrival?.gate      || f.departure?.gate     || null,
     baggage:  f.arrival?.baggageBelt || null,
   };
 }
 
-// ── FIX: Comprehensive status mapping for AeroDataBox values ─────────
-function mapStatus(s) {
-  if (!s) return "SCHEDULED";
-  // AeroDataBox uses PascalCase/camelCase — normalise
-  const l = s.toLowerCase().replace(/[\s_-]/g, "");
-  if (l === "landed" || l === "arrived")               return "LANDED";
-  if (l === "cancelled" || l === "canceled")           return "CANCELLED";
-  if (l === "enroute" || l === "airborne" || l === "departed" || l === "inflightx") return "IN_AIR";
-  if (l.includes("delay"))                             return "DELAYED";
-  if (l === "diverted")                                return "DIVERTED";
-  if (l === "boarding" || l === "gateclosed" || l === "taxiing") return "BOARDING";
-  if (l === "scheduled" || l === "expected")           return "SCHEDULED";
-  // Catch-all partial matches
-  if (l.includes("land") || l.includes("arriv"))      return "LANDED";
-  if (l.includes("cancel"))                            return "CANCELLED";
-  if (l.includes("air") || l.includes("route") || l.includes("depart")) return "IN_AIR";
-  return "SCHEDULED";
-}
-
-// ── FIX: Core matching logic — much more permissive ───────────────────
-//
-// Strategy:
-//   1. From origin departures, keep flights whose arrival.airport.iata === destIata
-//      OR whose arrival.airport.iata is missing (let implied dest fill it).
-//   2. From destination arrivals, keep flights whose departure.airport.iata === originIata
-//      OR whose departure.airport.iata is missing.
-//   3. Merge and deduplicate by flight number, preferring the richer record.
-//
+// ── Match flights from both airport feeds ─────────────────────────────
 function buildFlights(departures, arrivals, originIata, destIata) {
-  const flightMap = new Map(); // flightNum → mapped flight object
+  const flightMap = new Map();
+  const richness  = f => [
+    f.departure?.airport?.iata, f.arrival?.airport?.iata,
+    f.departure?.scheduledTime?.local, f.arrival?.scheduledTime?.local,
+    f.aircraft?.model, f.status,
+  ].filter(Boolean).length;
 
-  // Helper: score a record by how much data it has (higher = richer)
-  const richness = (f) => {
-    let score = 0;
-    if (f.departure?.airport?.iata) score++;
-    if (f.arrival?.airport?.iata) score++;
-    if (f.departure?.scheduledTime?.local) score++;
-    if (f.arrival?.scheduledTime?.local) score++;
-    if (f.aircraft?.model) score++;
-    if (f.status) score++;
-    return score;
-  };
-
-  // Process departures from origin airport
   departures.forEach(f => {
-    const arrIata = f.arrival?.airport?.iata;
-    // Include if: arrival airport matches dest, OR arrival airport is unknown (could be our dest)
-    if (arrIata && arrIata !== destIata) return; // confirmed different destination — skip
-    const mapped = mapFlight(f, originIata, destIata);
-    const existing = flightMap.get(mapped.flightNum);
-    if (!existing || richness(f) > richness(existing._raw)) {
-      mapped._raw = f;
-      flightMap.set(mapped.flightNum, mapped);
-    }
+    const arr = f.arrival?.airport?.iata;
+    if (arr && arr !== destIata) return; // confirmed wrong dest — skip
+    const m   = mapFlight(f, originIata, destIata);
+    m._raw    = f;
+    const ex  = flightMap.get(m.flightNum);
+    if (!ex || richness(f) > richness(ex._raw)) flightMap.set(m.flightNum, m);
   });
 
-  // Process arrivals at destination airport
   arrivals.forEach(f => {
-    const depIata = f.departure?.airport?.iata;
-    // Include if: departure airport matches origin, OR departure airport is unknown
-    if (depIata && depIata !== originIata) return; // confirmed different origin — skip
-    const mapped = mapFlight(f, originIata, destIata);
-    const existing = flightMap.get(mapped.flightNum);
-    if (!existing) {
-      mapped._raw = f;
-      flightMap.set(mapped.flightNum, mapped);
-    } else if (richness(f) > richness(existing._raw)) {
-      // Merge: prefer the richer record but fill in missing fields from the other
-      const merged = { ...existing, ...mapped };
-      // Restore fields that were better in the existing record
-      if (existing.depAirport !== "?" && mapped.depAirport === "?") merged.depAirport = existing.depAirport;
-      if (existing.arrAirport !== "?" && mapped.arrAirport === "?") merged.arrAirport = existing.arrAirport;
-      if (existing.depTime !== "--:--" && mapped.depTime === "--:--") merged.depTime = existing.depTime;
-      if (existing.arrTime !== "--:--" && mapped.arrTime === "--:--") merged.arrTime = existing.arrTime;
-      if (!mapped.aircraft && existing.aircraft) merged.aircraft = existing.aircraft;
+    const dep = f.departure?.airport?.iata;
+    if (dep && dep !== originIata) return; // confirmed wrong origin — skip
+    const m   = mapFlight(f, originIata, destIata);
+    const ex  = flightMap.get(m.flightNum);
+    if (!ex) {
+      m._raw = f; flightMap.set(m.flightNum, m);
+    } else if (richness(f) > richness(ex._raw)) {
+      const merged = { ...ex, ...m };
+      if (ex.depAirport !== "?" && m.depAirport === "?") merged.depAirport = ex.depAirport;
+      if (ex.arrAirport !== "?" && m.arrAirport === "?") merged.arrAirport = ex.arrAirport;
+      if (ex.depTime !== "--:--" && m.depTime === "--:--") merged.depTime = ex.depTime;
+      if (ex.arrTime !== "--:--" && m.arrTime === "--:--") merged.arrTime = ex.arrTime;
+      if (!m.aircraft && ex.aircraft) merged.aircraft = ex.aircraft;
       merged._raw = f;
-      flightMap.set(mapped.flightNum, merged);
+      flightMap.set(m.flightNum, merged);
     }
   });
 
-  // Clean up internal _raw field and sort by departure time
-  const results = [...flightMap.values()].map(({ _raw, ...rest }) => rest);
-  return results.sort((a, b) => {
-    if (a.depTime === "--:--") return 1;
-    if (b.depTime === "--:--") return -1;
-    return a.depTime.localeCompare(b.depTime);
-  });
+  return [...flightMap.values()]
+    .map(({ _raw, ...rest }) => rest)
+    .sort((a, b) => {
+      if (a.depTime === "--:--") return 1;
+      if (b.depTime === "--:--") return -1;
+      return a.depTime.localeCompare(b.depTime);
+    });
 }
 
 function calcStats(flights) {
@@ -321,210 +313,189 @@ function calcStats(flights) {
 function calcAirlineStats(flights) {
   const map = {};
   flights.forEach(f => {
-    if (!map[f.airlineName]) {
-      map[f.airlineName] = { name: f.airlineName, code: f.airlineCode, total: 0, landed: 0, inAir: 0, cancelled: 0, delayed: 0, times: [] };
-    }
+    if (!map[f.airlineName]) map[f.airlineName] = { name: f.airlineName, code: f.airlineCode, total: 0, landed: 0, inAir: 0, cancelled: 0, delayed: 0 };
     map[f.airlineName].total++;
     if (f.status === "LANDED")    map[f.airlineName].landed++;
     if (f.status === "IN_AIR")    map[f.airlineName].inAir++;
     if (f.status === "CANCELLED") map[f.airlineName].cancelled++;
     if (f.status === "DELAYED")   map[f.airlineName].delayed++;
-    if (f.depTime && f.depTime !== "--:--") map[f.airlineName].times.push(f.depTime);
   });
   return Object.values(map)
     .map(a => ({ ...a, rate: a.total > 0 ? Math.round(((a.landed + a.inAir) / a.total) * 100) : 0 }))
     .sort((a, b) => b.rate - a.rate);
 }
 
-// ── Groq AI prediction ────────────────────────────────────────────────
+// ── AI Prediction (Groq — free, no AeroDataBox units consumed) ────────
 async function getAIPrediction(flight, historicalFlights, airlineStats, routeStats) {
   if (!GROQ_API_KEY) return null;
-
-  const airlineStat = airlineStats.find(a => a.name === flight.airlineName);
-  const sameFlightHistory = historicalFlights.filter(f =>
-    f.flightNum === flight.flightNum && f.status !== "SCHEDULED"
-  );
+  const airlineStat       = airlineStats.find(a => a.name === flight.airlineName);
+  const sameFlightHistory = historicalFlights.filter(f => f.flightNum === flight.flightNum && f.status !== "SCHEDULED");
   const cancelledSameTime = historicalFlights.filter(f => {
     if (f.airlineName !== flight.airlineName || f.status !== "CANCELLED") return false;
-    const fHour = parseInt(f.depTime?.split(":")[0] ?? "0");
-    const tHour = parseInt(flight.depTime?.split(":")[0] ?? "0");
-    return Math.abs(fHour - tHour) <= 2;
+    return Math.abs(parseInt(f.depTime) - parseInt(flight.depTime)) <= 2;
   });
 
-  const prompt = `You are an aviation analyst. Predict the probability this flight will operate successfully.
-
-FLIGHT: ${flight.flightNum} by ${flight.airlineName}
-Scheduled departure: ${flight.depTime} | Aircraft: ${flight.aircraft || "unknown"}
-
-AIRLINE PERFORMANCE (last 48h on this route):
-- Total flights: ${airlineStat?.total || 0}
-- Landed: ${airlineStat?.landed || 0}
-- Cancelled: ${airlineStat?.cancelled || 0}
-- Delayed: ${airlineStat?.delayed || 0}
-- Success rate: ${airlineStat?.rate || 0}%
-
-SAME FLIGHT NUMBER HISTORY:
-${sameFlightHistory.length > 0 ? sameFlightHistory.map(f => `- ${f.depDate} ${f.depTime}: ${f.status}`).join("\n") : "No history found"}
-
-CANCELLATIONS AT SIMILAR TIME BY THIS AIRLINE: ${cancelledSameTime.length} found
-
-OVERALL ROUTE STATS (48h):
-- Route success rate: ${routeStats.successRate}%
-- Total cancelled on route: ${routeStats.cancelled}
-
-Return ONLY a JSON object, no explanation:
-{
-  "flyProbability": 78,
-  "cancelProbability": 22,
-  "confidence": "high",
-  "reasoning": "2-3 sentence explanation based on the data above",
-  "riskFactors": ["factor1", "factor2"],
-  "recommendation": "one line actionable advice"
-}`;
+  const prompt = `You are an aviation analyst. Predict flight operation probability.
+FLIGHT: ${flight.flightNum} by ${flight.airlineName} | DEP: ${flight.depTime} | Aircraft: ${flight.aircraft || "unknown"}
+AIRLINE (last 24h): ${airlineStat?.total || 0} flights | ${airlineStat?.landed || 0} landed | ${airlineStat?.cancelled || 0} cancelled | ${airlineStat?.rate || 0}% success
+SAME FLIGHT HISTORY: ${sameFlightHistory.map(f => `${f.depDate} ${f.depTime}: ${f.status}`).join(", ") || "none"}
+SIMILAR TIME CANCELLATIONS: ${cancelledSameTime.length}
+ROUTE: ${routeStats.successRate}% success | ${routeStats.cancelled} cancelled / ${routeStats.total} total
+Return ONLY JSON: {"flyProbability":78,"cancelProbability":22,"confidence":"high","reasoning":"2-3 sentences","riskFactors":["factor1"],"recommendation":"one line"}`;
 
   try {
-    const resp = await axios.post(
+    const resp  = await axios.post(
       "https://api.groq.com/openai/v1/chat/completions",
-      {
-        model: "llama-3.3-70b-versatile",
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 400,
-        temperature: 0.2,
-      },
-      {
-        headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json" },
-        timeout: 15000,
-      }
+      { model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: prompt }], max_tokens: 400, temperature: 0.2 },
+      { headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json" }, timeout: 15000 }
     );
-    const text = resp.data.choices[0].message.content;
+    const text  = resp.data.choices[0].message.content;
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    return JSON.parse(match[0]);
+    return match ? JSON.parse(match[0]) : null;
   } catch (e) {
-    console.error("Groq prediction error:", e.message);
+    console.error("Groq error:", e.message);
     return null;
   }
 }
 
-// ── /api/routes ───────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// ROUTES
+// ═══════════════════════════════════════════════════════════════════════
+
+// /api/routes — 24h history, ~8 units per unique route (cached 30 min)
 app.get("/api/routes", async (req, res) => {
   await loadAirportDB();
   const { origin, destination } = req.query;
   if (!origin || !destination) return res.status(400).json({ error: "origin and destination required" });
-  const o = origin.trim().toUpperCase();
-  const d = destination.trim().toUpperCase();
+  const o   = origin.trim().toUpperCase();
+  const d   = destination.trim().toUpperCase();
   const oAp = AIRPORT_DB[o], dAp = AIRPORT_DB[d];
   if (!oAp) return res.status(400).json({ error: `Airport not found: ${o}` });
   if (!dAp) return res.status(400).json({ error: `Airport not found: ${d}` });
   if (o === d) return res.status(400).json({ error: "Origin and destination must differ" });
 
-  console.log(`\n=== ROUTE: ${o}(${oAp.icao}) → ${d}(${dAp.icao}) | 48h history ===`);
+  const routeCacheKey = `route-${o}-${d}`;
+  const routeCached   = getCached(routeCacheKey, HISTORICAL_TTL);
+  if (routeCached) {
+    console.log(`[Cache HIT] Route ${o}→${d} — 0 units`);
+    return res.json({ ...routeCached, fromCache: true });
+  }
 
-  // FIX: fetch departures from origin AND arrivals at destination in parallel
+  // 24h history = 2 chunks × 2 airports = 4 calls = 8 units
+  console.log(`\n=== ROUTE ${o}→${d} | 24h | ~8 units ===`);
   const [origDeps, destArrs] = await Promise.all([
-    fetchTimeRange(oAp.icao, "Departure", 48, 0),
-    fetchTimeRange(dAp.icao, "Arrival",   48, 0),
+    fetchTimeRange(oAp.icao, "Departure", 24, 0, true),
+    fetchTimeRange(dAp.icao, "Arrival",   24, 0, true),
   ]);
 
-  console.log(`  Raw: ${origDeps.length} departures from ${o}, ${destArrs.length} arrivals at ${d}`);
-
-  const flights = buildFlights(origDeps, destArrs, o, d);
-  console.log(`  Matched: ${flights.length} flights on ${o}→${d}`);
-
-  const stats = calcStats(flights);
+  console.log(`  Raw: ${origDeps.length} deps / ${destArrs.length} arrs`);
+  const flights      = buildFlights(origDeps, destArrs, o, d);
+  const stats        = calcStats(flights);
   const airlineStats = calcAirlineStats(flights);
+  console.log(`  Matched: ${flights.length} flights`);
 
-  // Split into time buckets
-  const now = new Date();
-  const last24hCutoff = new Date(now.getTime() - 24 * 3600000);
+  // Split into two 12h buckets for the tabs
+  const now           = new Date();
+  const mid12hCutoff  = new Date(now.getTime() - 12 * 3600000);
+  const last12h       = flights.filter(f => f.depDate && f.depTime !== "--:--" && new Date(`${f.depDate}T${f.depTime}`) >= mid12hCutoff);
+  const prev12h       = flights.filter(f => f.depDate && f.depTime !== "--:--" && new Date(`${f.depDate}T${f.depTime}`) <  mid12hCutoff);
 
-  const last24h = flights.filter(f => {
-    if (!f.depDate || f.depTime === "--:--") return false;
-    return new Date(`${f.depDate}T${f.depTime}`) >= last24hCutoff;
-  });
-  const prev24h = flights.filter(f => {
-    if (!f.depDate || f.depTime === "--:--") return false;
-    return new Date(`${f.depDate}T${f.depTime}`) < last24hCutoff;
-  });
-
-  res.json({
+  const payload = {
     origin: oAp, destination: dAp,
-    dataWindow: "48h history",
-    stats, airlineStats,
-    flights, last24h, prev24h,
+    dataWindow: "24h history",
+    stats, airlineStats, flights,
+    last24h: flights,   // frontend compat alias
+    last12h, prev12h,
+    prev24h: prev12h,   // frontend compat alias
     dataSource: "aerodatabox",
-    debug: { rawDepartures: origDeps.length, rawArrivals: destArrs.length, matched: flights.length },
-  });
+    debug: {
+      rawDepartures: origDeps.length,
+      rawArrivals:   destArrs.length,
+      matched:       flights.length,
+      unitsThisCall: 8,
+      sessionTotal:  QUOTA.used,
+    },
+  };
+  setCache(routeCacheKey, payload);
+  res.json(payload);
 });
 
-// ── /api/future ───────────────────────────────────────────────────────
+// /api/future — next 12h, ~4 units (cached 10 min)
 app.get("/api/future", async (req, res) => {
   await loadAirportDB();
   const { origin, destination } = req.query;
   if (!origin || !destination) return res.status(400).json({ error: "required" });
-  const o = origin.trim().toUpperCase();
-  const d = destination.trim().toUpperCase();
+  const o   = origin.trim().toUpperCase();
+  const d   = destination.trim().toUpperCase();
   const oAp = AIRPORT_DB[o], dAp = AIRPORT_DB[d];
   if (!oAp || !dAp) return res.status(400).json({ error: "Airport not found" });
 
-  console.log(`[Future] ${o}(${oAp.icao}) → ${d}(${dAp.icao})`);
+  const futureCacheKey = `future-${o}-${d}`;
+  const futureCached   = getCached(futureCacheKey, LIVE_TTL);
+  if (futureCached) {
+    console.log(`[Cache HIT] Future ${o}→${d} — 0 units`);
+    return res.json({ ...futureCached, fromCache: true });
+  }
 
+  // Next 12h = 1 window × 2 airports = 2 calls = 4 units
+  console.log(`[Future] ${o}→${d} | ~4 units`);
   const [origDeps, destArrs] = await Promise.all([
-    fetchTimeRange(oAp.icao, "Departure", 0, 24),
-    fetchTimeRange(dAp.icao, "Arrival",   0, 24),
+    fetchTimeRange(oAp.icao, "Departure", 0, 12, false),
+    fetchTimeRange(dAp.icao, "Arrival",   0, 12, false),
   ]);
 
   const flights = buildFlights(origDeps, destArrs, o, d)
-    .filter(f => ["SCHEDULED", "BOARDING", "DELAYED"].includes(f.status));
+    .filter(f => ["SCHEDULED","BOARDING","DELAYED"].includes(f.status));
 
-  console.log(`[Future] ${o}→${d}: ${flights.length} upcoming flights`);
-  res.json({ origin: oAp, destination: dAp, flights, window: "next 24h" });
+  const payload = { origin: oAp, destination: dAp, flights, window: "next 12h" };
+  setCache(futureCacheKey, payload);
+  res.json(payload);
 });
 
-// ── /api/predict ──────────────────────────────────────────────────────
+// /api/predict — re-uses cached route data so costs 0 extra units
 app.get("/api/predict", async (req, res) => {
   await loadAirportDB();
   const { origin, destination, flightNum } = req.query;
   if (!origin || !destination || !flightNum) return res.status(400).json({ error: "required" });
-  const o = origin.trim().toUpperCase();
-  const d = destination.trim().toUpperCase();
+  const o   = origin.trim().toUpperCase();
+  const d   = destination.trim().toUpperCase();
   const oAp = AIRPORT_DB[o], dAp = AIRPORT_DB[d];
   if (!oAp || !dAp) return res.status(400).json({ error: "Airport not found" });
 
-  const [origDeps, destArrs] = await Promise.all([
-    fetchTimeRange(oAp.icao, "Departure", 48, 0),
-    fetchTimeRange(dAp.icao, "Arrival",   48, 0),
-  ]);
-  const historicalFlights = buildFlights(origDeps, destArrs, o, d);
-  const airlineStats = calcAirlineStats(historicalFlights);
-  const routeStats = calcStats(historicalFlights);
+  // Pull from cache first — free
+  const routeCached     = getCached(`route-${o}-${d}`, HISTORICAL_TTL);
+  let historicalFlights = routeCached?.flights || [];
 
+  if (historicalFlights.length === 0) {
+    const [deps, arrs] = await Promise.all([
+      fetchTimeRange(oAp.icao, "Departure", 24, 0, true),
+      fetchTimeRange(dAp.icao, "Arrival",   24, 0, true),
+    ]);
+    historicalFlights = buildFlights(deps, arrs, o, d);
+  }
+
+  const airlineStats = calcAirlineStats(historicalFlights);
+  const routeStats   = calcStats(historicalFlights);
   const targetFlight = historicalFlights.find(f => f.flightNum === flightNum)
     || { flightNum, airlineName: flightNum.slice(0, 2), depTime: "--:--", aircraft: null };
 
   const prediction = await getAIPrediction(targetFlight, historicalFlights, airlineStats, routeStats);
   if (!prediction) return res.status(500).json({ error: "AI prediction failed" });
-
   res.json({ flight: targetFlight, prediction, basedOn: `${historicalFlights.length} flights analyzed` });
 });
 
-// ── /api/events ───────────────────────────────────────────────────────
+// /api/events
 app.get("/api/events", async (req, res) => {
   const cached = getCached("world-events", 20 * 60 * 1000);
   if (cached) return res.json(cached);
   if (!GROQ_API_KEY) return res.status(500).json({ error: "GROQ_API_KEY not set" });
   if (!NEWS_API_KEY) return res.status(500).json({ error: "NEWS_API_KEY not set" });
-
   try {
     const newsResp = await axios.get("https://newsapi.org/v2/everything", {
-      params: {
-        q: "airspace OR aviation OR airline OR airport OR war OR conflict OR airstrike OR sanctions OR flight ban OR military",
-        language: "en", sortBy: "publishedAt", pageSize: 20, apiKey: NEWS_API_KEY,
-      },
+      params: { q: "airspace OR aviation OR airline OR airport OR war OR conflict OR airstrike OR sanctions OR flight ban OR military", language: "en", sortBy: "publishedAt", pageSize: 20, apiKey: NEWS_API_KEY },
       timeout: 10000,
     });
-    const articles = newsResp.data?.articles || [];
-    const headlines = articles
+    const headlines = (newsResp.data?.articles || [])
       .filter(a => a.title && !a.title.includes("[Removed]"))
       .slice(0, 15)
       .map(a => `- ${a.title}: ${a.description?.slice(0, 120) || ""}`)
@@ -532,16 +503,11 @@ app.get("/api/events", async (req, res) => {
 
     const groqResp = await axios.post(
       "https://api.groq.com/openai/v1/chat/completions",
-      {
-        model: "llama-3.3-70b-versatile",
-        messages: [{ role: "user", content: `You are a global aviation security analyst. Analyze these real news headlines and return a JSON array of 6-10 aviation-relevant events with severity ratings.\n\nHEADLINES:\n${headlines}\n\nSeverity: S1=monitor, S2=low, S3=moderate, S4=high, S5=critical\n\nReturn ONLY valid JSON array:\n[{"id":"evt-1","title":"short title","location":"Country","summary":"2-3 sentences on situation and aviation impact","severity":"S3","severityLabel":"Moderate","affectedAirports":["IATA"],"affectedRoutes":["corridor description"],"category":"Conflict","timestamp":"${new Date().toISOString()}","trend":"escalating","source":"source name"}]\n\nCategories: Conflict, Airspace, Weather, Political, Security, Infrastructure\nTrend: escalating, stable, deescalating` }],
-        max_tokens: 2500,
-        temperature: 0.3,
-      },
+      { model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: `You are a global aviation security analyst. Analyze these real news headlines and return a JSON array of 6-10 aviation-relevant events.\n\nHEADLINES:\n${headlines}\n\nSeverity: S1=monitor, S2=low, S3=moderate, S4=high, S5=critical\nReturn ONLY valid JSON array:\n[{"id":"evt-1","title":"short title","location":"Country","summary":"2-3 sentences","severity":"S3","severityLabel":"Moderate","affectedAirports":["IATA"],"affectedRoutes":["corridor"],"category":"Conflict","timestamp":"${new Date().toISOString()}","trend":"escalating","source":"source"}]\nCategories: Conflict, Airspace, Weather, Political, Security, Infrastructure` }],
+        max_tokens: 2500, temperature: 0.3 },
       { headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json" }, timeout: 30000 }
     );
-    const text = groqResp.data.choices[0].message.content;
-    const match = text.match(/\[[\s\S]*\]/);
+    const match = groqResp.data.choices[0].message.content.match(/\[[\s\S]*\]/);
     if (!match) throw new Error("No JSON in response");
     const events = JSON.parse(match[0]);
     setCache("world-events", events);
@@ -552,7 +518,7 @@ app.get("/api/events", async (req, res) => {
   }
 });
 
-// ── /api/airports ─────────────────────────────────────────────────────
+// /api/airports
 app.get("/api/airports", async (req, res) => {
   await loadAirportDB();
   const q = (req.query.q || "").toUpperCase().trim();
@@ -570,53 +536,48 @@ app.get("/api/airports", async (req, res) => {
   res.json(results);
 });
 
-// ── /api/debug — inspect raw AeroDataBox response for a route ─────────
-app.get("/api/debug", async (req, res) => {
+// /api/health
+app.get("/api/health", async (req, res) => {
   await loadAirportDB();
-  const { origin, destination } = req.query;
-  if (!origin || !destination) return res.status(400).json({ error: "required" });
-  const o = origin.trim().toUpperCase();
-  const d = destination.trim().toUpperCase();
-  const oAp = AIRPORT_DB[o], dAp = AIRPORT_DB[d];
-  if (!oAp || !dAp) return res.status(400).json({ error: "Airport not found" });
-
-  const now = new Date();
-  const from = new Date(now.getTime() - 6 * 3600000);
-  const to   = new Date(now.getTime() + 1 * 3600000);
-  const fmt  = d => d.toISOString().slice(0, 16);
-
-  // Fetch raw samples for both airports
-  const [rawDep, rawArr] = await Promise.all([
-    fetchWindow(oAp.icao, "Departure", from, to),
-    fetchWindow(dAp.icao, "Arrival",   from, to),
-  ]);
-
+  const remaining = QUOTA.MONTHLY_UNIT_LIMIT - QUOTA.used;
   res.json({
-    originIcao: oAp.icao,
-    destIcao: dAp.icao,
-    window: `${fmt(from)} → ${fmt(to)}`,
-    rawDepartures: rawDep.slice(0, 5),   // first 5 raw records
-    rawArrivals:   rawArr.slice(0, 5),
-    depCount: rawDep.length,
-    arrCount: rawArr.length,
+    status: "ok",
+    airportsLoaded:  Object.keys(AIRPORT_DB).length,
+    aeroDataBox:     RAPIDAPI_KEY  ? "set" : "NOT SET",
+    groq:            GROQ_API_KEY  ? "set" : "NOT SET",
+    newsApi:         NEWS_API_KEY  ? "set" : "NOT SET",
+    quota: {
+      plan:                  "Pro",
+      monthlyUnitLimit:      QUOTA.MONTHLY_UNIT_LIMIT,
+      tier2CostPerCall:      QUOTA.TIER2_COST,
+      usedThisSession:       QUOTA.used,
+      remainingEstimate:     remaining,
+      unitsPerRouteSearch:   8,
+      unitsPerFutureLookup:  4,
+      estimatedSearchesLeft: Math.floor(remaining / 8),
+    },
+    cacheEntries: cache.size,
+    time: new Date().toISOString(),
   });
 });
 
-// ── /api/health ───────────────────────────────────────────────────────
-app.get("/api/health", async (req, res) => {
-  await loadAirportDB();
+// /api/quota — quick quota check
+app.get("/api/quota", (req, res) => {
+  const remaining = QUOTA.MONTHLY_UNIT_LIMIT - QUOTA.used;
   res.json({
-    status: "ok",
-    airportsLoaded: Object.keys(AIRPORT_DB).length,
-    aeroDataBox: RAPIDAPI_KEY ? "set" : "NOT SET",
-    groq: GROQ_API_KEY ? "set" : "NOT SET",
-    newsApi: NEWS_API_KEY ? "set" : "NOT SET",
-    time: new Date().toISOString(),
+    used: QUOTA.used,
+    remaining,
+    limit:                QUOTA.MONTHLY_UNIT_LIMIT,
+    percentUsed:          Math.round((QUOTA.used / QUOTA.MONTHLY_UNIT_LIMIT) * 100),
+    estimatedSearchesLeft: Math.floor(remaining / 8),
   });
 });
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
-  console.log(`✈  Escape Route API on port ${PORT}`);
+  console.log(`✈  Escape Route API — port ${PORT}`);
+  console.log(`   Pro plan: ${QUOTA.MONTHLY_UNIT_LIMIT} units/month`);
+  console.log(`   Tier 2 = ${QUOTA.TIER2_COST} units/call | Route search ~8 units | Future ~4 units`);
+  console.log(`   Max ~${Math.floor(QUOTA.MONTHLY_UNIT_LIMIT / 8)} route searches/month without cache`);
   await loadAirportDB();
 });
