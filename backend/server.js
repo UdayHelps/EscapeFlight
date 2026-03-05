@@ -195,8 +195,13 @@ async function fetchTimeRange(icao, direction, hoursAgo, hoursAhead, isHistorica
   );
   const seen = new Set(), all = [];
   results.flat().forEach(f => {
-    const key = f.number || f.callSign;
-    if (key && !seen.has(key)) { seen.add(key); all.push(f); }
+    // Use flight number if available, otherwise fall back to airline+depTime
+    // Never silently drop flights just because they lack a number
+    const num = f.number || f.callSign;
+    const dep = f.departure?.scheduledTime?.utc || f.departure?.scheduledTime?.local || "";
+    const al  = f.airline?.iata || f.airline?.name || "UNK";
+    const key = num || `${al}-${dep.slice(0, 16)}`;
+    if (!seen.has(key)) { seen.add(key); all.push(f); }
   });
   return all;
 }
@@ -285,7 +290,7 @@ function flightKey(f) {
 //   - This gives us real LANDED/CANCELLED without relying on a single airport's
 //     live feed, which may have poor coverage.
 // ─────────────────────────────────────────────────────────────────────
-function buildFlights(origDeps, destArrs, originIata, destIata) {
+function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], origArrs = []) {
   // richness score: how much data does this raw flight object actually have?
   const richness = f => [
     f.departure?.airport?.iata, f.arrival?.airport?.iata,
@@ -331,22 +336,66 @@ function buildFlights(origDeps, destArrs, originIata, destIata) {
     }
   };
 
-  // Pass 1: Origin departures — flights leaving the origin airport
+  // Pass 1: Origin departures — flights leaving the origin airport bound for destination
   origDeps.forEach(f => {
-    // Only keep flights going to our destination (or unknown destination)
     const arrIata = f.arrival?.airport?.iata;
-    if (arrIata && arrIata !== destIata) return;
+    if (arrIata && arrIata !== destIata) return; // filter to our route
     upsert(f, originIata, destIata, "origin-dep");
   });
 
-  // Pass 2: Destination arrivals — flights landing at the destination airport
-  // THIS IS THE KEY CHANGE: arrival status at destination is far more reliable
-  // than departure status at origin for low-coverage Middle East/Asia airports.
+  // Pass 2: Destination arrivals — flights arriving at destination from origin
+  // KEY FEED: arrival status at destination is far more reliable for live confirmation
   destArrs.forEach(f => {
-    // Only keep flights coming from our origin (or unknown origin)
     const depIata = f.departure?.airport?.iata;
-    if (depIata && depIata !== originIata) return;
+    if (depIata && depIata !== originIata) return; // filter to our route
     upsert(f, originIata, destIata, "dest-arr");
+  });
+
+  // FALLBACK: If both primary feeds returned nothing (common for some regional routes
+  // where origin airport has no departure data), seed from destDeps filtered by
+  // arrival airport = originIata. These are return flights of the same aircraft,
+  // meaning the outbound leg operated successfully.
+  if (flightMap.size === 0 && destDeps.length > 0) {
+    console.log(`[buildFlights] Primary feeds empty — trying destDeps as fallback seed`);
+    destDeps.forEach(f => {
+      // A flight departing from dest going BACK to origin confirms the outbound ran
+      const arrIata = f.arrival?.airport?.iata;
+      if (arrIata && arrIata !== originIata) return;
+      upsert(f, originIata, destIata, "dest-dep-fallback");
+      // Immediately mark as LANDED since this is the return leg
+      const key = flightKey(f);
+      const existing = flightMap.get(key);
+      if (existing) {
+        existing.status = "LANDED";
+        existing.statusNote = "Inferred: return flight observed at destination";
+      }
+    });
+  }
+
+  // Pass 3: Destination departures — if a flight number that matches our route
+  // is seen departing FROM the destination, that strongly confirms it arrived there.
+  // We do NOT filter by route here — we match by flight number against already-seeded flights.
+  destDeps.forEach(f => {
+    const key = flightKey(f);
+    const existing = flightMap.get(key);
+    if (existing) {
+      // This flight number departed from our destination — it must have arrived first
+      const upgraded = betterStatus("LANDED", existing.status);
+      if (upgraded !== existing.status) {
+        existing.status = upgraded;
+        existing.statusNote = "Confirmed: aircraft subsequently departed destination airport";
+      }
+    }
+  });
+
+  // Pass 4: Origin arrivals — catch diverted flights that returned to origin
+  origArrs.forEach(f => {
+    const key = flightKey(f);
+    const existing = flightMap.get(key);
+    if (existing && mapStatus(f.status) === "DIVERTED") {
+      existing.status = "DIVERTED";
+      existing.statusNote = "Flight diverted — returned to origin";
+    }
   });
 
   const now = new Date();
@@ -530,43 +579,20 @@ app.get("/api/routes", async (req, res) => {
     fetchTimeRange(dAp.icao, "Departure", 24, 0, true),
   ]);
 
-  console.log(`  Raw: ${origDeps.length} deps from ${o} | ${destArrs.length} arrs at ${d}`);
+  console.log(`  Raw feeds:`);
+  console.log(`    origDeps (${o} departures): ${origDeps.length}`);
+  console.log(`    origArrs (${o} arrivals):   ${origArrs.length}`);
+  console.log(`    destArrs (${d} arrivals):   ${destArrs.length}`);
+  console.log(`    destDeps (${d} departures): ${destDeps.length}`);
 
-  // Primary build: origin departures + destination arrivals (the two most useful feeds)
-  const flights = buildFlights(origDeps, destArrs, o, d);
-
-  // Secondary enrichment: origin arrivals tell us if a flight returned/was diverted.
-  // Destination departures tell us if the inbound plane actually then departed onward.
-  // We use these as extra signals to upgrade statuses on already-matched flights.
-  const enrichMap = new Map(flights.map(f => [f.flightNum, f]));
-
-  // Check origin arrivals: if a flight number appears as arriving BACK at origin
-  // within the window and was marked DIVERTED, upgrade it.
-  origArrs.forEach(f => {
-    const key = flightKey(f);
-    const existing = enrichMap.get(key);
-    if (existing && mapStatus(f.status) === "DIVERTED") {
-      existing.status = "DIVERTED";
-    }
-  });
-
-  // Check dest departures: if the same flight number departed from destination
-  // it confirms the plane made it there — strong signal it was operated/landed.
-  destDeps.forEach(f => {
-    const key = flightKey(f);
-    const existing = enrichMap.get(key);
-    if (existing && ["OPERATED", "UNKNOWN", "SCHEDULED"].includes(existing.status)) {
-      // If the aircraft departed from the destination, it must have arrived there
-      existing.status = "LANDED";
-      existing.statusNote = "Confirmed: aircraft subsequently departed destination airport";
-    }
-  });
+  // All 4 feeds go into buildFlights — it handles merging, status upgrading,
+  // destDeps confirmation, and origArrs divert detection internally.
+  const flights = buildFlights(origDeps, destArrs, o, d, destDeps, origArrs);
 
   const stats        = calcStats(flights);
   const airlineStats = calcAirlineStats(flights);
 
-  console.log(`  Matched: ${flights.length} flights`);
-  console.log(`    LANDED: ${stats.landed} | CANCELLED: ${stats.cancelled} | OPERATED(inferred): ${stats.operated} | IN_AIR: ${stats.inAir}`);
+  console.log(`  Matched: ${flights.length} | LANDED:${stats.landed} CANCELLED:${stats.cancelled} OPERATED:${stats.operated} IN_AIR:${stats.inAir} UNKNOWN:${stats.unknown}`);
 
   GLOBAL_STATS.flightsTracked      += stats.total;
   GLOBAL_STATS.cancellationsCaught += stats.cancelled;
