@@ -127,8 +127,15 @@ function loadFallbackAirports() {
 
 // ── Core fetch — single window, max 12h, Tier 2 = 2 units ────────────
 async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = true) {
+  // Round timestamps to nearest hour so calls within the same hour share cache
+  // This prevents debug + routes endpoints generating different keys for same data
+  const roundHour = d => {
+    const r = new Date(d);
+    r.setMinutes(0, 0, 0);
+    return r;
+  };
   const fmt      = d => d.toISOString().slice(0, 16);
-  const cacheKey = `${icao}-${direction}-${fmt(fromDate)}-${fmt(toDate)}`;
+  const cacheKey = `${icao}-${direction}-${fmt(roundHour(fromDate))}-${fmt(roundHour(toDate))}`;
   const ttl      = isHistorical ? HISTORICAL_TTL : LIVE_TTL;
   const cached   = getCached(cacheKey, ttl);
   if (cached) {
@@ -805,7 +812,7 @@ app.get("/api/quota", (req, res) => {
 });
 
 // /api/debug — inspect raw feed data for a route without building flights
-// Shows sample of raw flights from each feed to diagnose matching issues
+// Uses same fetch calls as /api/routes so it benefits from / populates the same cache.
 app.get("/api/debug", async (req, res) => {
   await loadAirportDB();
   const { origin, destination } = req.query;
@@ -815,73 +822,68 @@ app.get("/api/debug", async (req, res) => {
   const oAp = AIRPORT_DB[o], dAp = AIRPORT_DB[d];
   if (!oAp || !dAp) return res.status(400).json({ error: "Airport not found" });
 
-  // Pull from cache — free, no quota cost
-  const origDepsCached = getCached(`${oAp.icao}-Departure-${new Date(Date.now() - 24*3600000).toISOString().slice(0,16)}-${new Date().toISOString().slice(0,16)}`, HISTORICAL_TTL);
-
-  // Fetch fresh if not cached (uses quota)
-  const [origDeps, destArrs] = await Promise.all([
+  // Identical fetch calls to /api/routes — will hit cache if routes was called first
+  const [origDeps, origArrs, destArrs, destDeps] = await Promise.all([
     fetchTimeRange(oAp.icao, "Departure", 24, 0, true),
+    fetchTimeRange(oAp.icao, "Arrival",   24, 0, true),
     fetchTimeRange(dAp.icao, "Arrival",   24, 0, true),
+    fetchTimeRange(dAp.icao, "Departure", 24, 0, true),
   ]);
 
-  // Sample flights going to our destination from origDeps
   const toDestSample = origDeps
-    .filter(f => {
-      const arr = f.arrival?.airport?.iata;
-      return !arr || arr === d; // include flights with no arrival iata too
-    })
+    .filter(f => f.arrival?.airport?.iata === d)
     .slice(0, 20)
     .map(f => ({
-      num:       f.number || f.callSign,
-      airline:   f.airline?.name,
-      depIata:   f.departure?.airport?.iata,
-      arrIata:   f.arrival?.airport?.iata,   // KEY: is this populated?
-      depTime:   f.departure?.scheduledTime?.local,
-      status:    f.status,
-      isCS:      f.isCodeshared,
+      num: f.number || f.callSign, airline: f.airline?.name,
+      arrIata: f.arrival?.airport?.iata, depTime: f.departure?.scheduledTime?.local,
+      status: f.status, isCS: f.isCodeshared,
     }));
 
-  // How many origDeps have null arrIata?
-  const nullArrIata   = origDeps.filter(f => !f.arrival?.airport?.iata).length;
-  const matchedToD    = origDeps.filter(f => f.arrival?.airport?.iata === d).length;
-  const toOtherDest   = origDeps.filter(f => f.arrival?.airport?.iata && f.arrival.airport.iata !== d).length;
-
-  // Sample from destArrs
-  const fromOriginSample = destArrs
-    .filter(f => {
-      const dep = f.departure?.airport?.iata;
-      return !dep || dep === o;
-    })
+  const fromOrigSample = destArrs
+    .filter(f => f.departure?.airport?.iata === o)
     .slice(0, 20)
     .map(f => ({
-      num:     f.number || f.callSign,
-      airline: f.airline?.name,
-      depIata: f.departure?.airport?.iata,
-      arrIata: f.arrival?.airport?.iata,
-      arrTime: f.arrival?.scheduledTime?.local,
-      status:  f.status,
+      num: f.number || f.callSign, airline: f.airline?.name,
+      depIata: f.departure?.airport?.iata, arrTime: f.arrival?.scheduledTime?.local,
+      status: f.status,
     }));
 
-  const nullDepIata  = destArrs.filter(f => !f.departure?.airport?.iata).length;
-  const fromO        = destArrs.filter(f => f.departure?.airport?.iata === o).length;
+  // Show status breakdown of ALL destArrs to understand what statuses exist
+  const destArrsStatusBreakdown = destArrs.reduce((acc, f) => {
+    const s = f.status || "null";
+    acc[s] = (acc[s] || 0) + 1;
+    return acc;
+  }, {});
+
+  const origDepsStatusBreakdown = origDeps
+    .filter(f => f.arrival?.airport?.iata === d)
+    .reduce((acc, f) => {
+      const s = f.status || "null";
+      acc[s] = (acc[s] || 0) + 1;
+      return acc;
+    }, {});
 
   res.json({
     route: `${o}→${d}`,
     origDeps: {
-      total:        origDeps.length,
-      withArrIata:  origDeps.length - nullArrIata,
-      nullArrIata,
-      matchedToDest: matchedToD,
-      toOtherDest,
-      sample:       toDestSample,
+      total: origDeps.length,
+      nullArrIata:   origDeps.filter(f => !f.arrival?.airport?.iata).length,
+      matchedToDest: origDeps.filter(f => f.arrival?.airport?.iata === d).length,
+      toOtherDest:   origDeps.filter(f => f.arrival?.airport?.iata && f.arrival.airport.iata !== d).length,
+      statusBreakdownForOurRoute: origDepsStatusBreakdown,
+      sample: toDestSample,
     },
+    origArrs: { total: origArrs.length },
     destArrs: {
-      total:       destArrs.length,
-      withDepIata: destArrs.length - nullDepIata,
-      nullDepIata,
-      fromOrigin:  fromO,
-      sample:      fromOriginSample,
+      total: destArrs.length,
+      nullDepIata:  destArrs.filter(f => !f.departure?.airport?.iata).length,
+      fromOrigin:   destArrs.filter(f => f.departure?.airport?.iata === o).length,
+      toOtherOrig:  destArrs.filter(f => f.departure?.airport?.iata && f.departure.airport.iata !== o).length,
+      statusBreakdownAll: destArrsStatusBreakdown,
+      sample: fromOrigSample,
     },
+    destDeps: { total: destDeps.length },
+    quotaUsed: QUOTA.used,
   });
 });
 // Use this after deploying code changes, or when you suspect stale data.
