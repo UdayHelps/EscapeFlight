@@ -149,7 +149,7 @@ async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = tru
         withLeg:        "true",
         direction,
         withCancelled:  "true",
-        withCodeshared: "false",
+        withCodeshared: "true",   // MUST be true — flydubai FZ flights appear as EK codeshares and get dropped otherwise
         withCargo:      "false",
         withPrivate:    "false",
         withLocation:   "false",
@@ -250,48 +250,60 @@ function mapFlight(f, impliedDep, impliedArr) {
     terminal: f.arrival?.terminal  || f.departure?.terminal || null,
     gate:     f.arrival?.gate      || f.departure?.gate     || null,
     baggage:  f.arrival?.baggageBelt || null,
+    isCodeshared: f.isCodeshared || false,
   };
 }
 
 // ── Match flights from both airport feeds ─────────────────────────────
+// withCodeshared:true returns duplicates e.g. FZ123 + EK4567 = same plane.
+// We score operating carrier (isCodeshared===false) higher so it wins dedup.
 function buildFlights(departures, arrivals, originIata, destIata) {
   const flightMap = new Map();
-  const richness  = f => [
+
+  const richness = f => [
     f.departure?.airport?.iata, f.arrival?.airport?.iata,
     f.departure?.scheduledTime?.local, f.arrival?.scheduledTime?.local,
     f.aircraft?.model, f.status,
   ].filter(Boolean).length;
 
+  // Operating carrier beats codeshare marketing entry
+  const score = f => (f.isCodeshared ? 0 : 10) + richness(f);
+
+  const upsert = (f, impliedDep, impliedArr) => {
+    const m      = mapFlight(f, impliedDep, impliedArr);
+    m._raw       = f;
+    m._score     = score(f);
+    const ex     = flightMap.get(m.flightNum);
+    if (!ex || m._score > ex._score) flightMap.set(m.flightNum, m);
+  };
+
   departures.forEach(f => {
-    const arr = f.arrival?.airport?.iata;
-    if (arr && arr !== destIata) return; // confirmed wrong dest — skip
-    const m   = mapFlight(f, originIata, destIata);
-    m._raw    = f;
-    const ex  = flightMap.get(m.flightNum);
-    if (!ex || richness(f) > richness(ex._raw)) flightMap.set(m.flightNum, m);
+    const arrIata = f.arrival?.airport?.iata;
+    if (arrIata && arrIata !== destIata) return; // confirmed wrong dest — skip
+    upsert(f, originIata, destIata);
   });
 
   arrivals.forEach(f => {
-    const dep = f.departure?.airport?.iata;
-    if (dep && dep !== originIata) return; // confirmed wrong origin — skip
-    const m   = mapFlight(f, originIata, destIata);
-    const ex  = flightMap.get(m.flightNum);
-    if (!ex) {
-      m._raw = f; flightMap.set(m.flightNum, m);
-    } else if (richness(f) > richness(ex._raw)) {
-      const merged = { ...ex, ...m };
-      if (ex.depAirport !== "?" && m.depAirport === "?") merged.depAirport = ex.depAirport;
-      if (ex.arrAirport !== "?" && m.arrAirport === "?") merged.arrAirport = ex.arrAirport;
-      if (ex.depTime !== "--:--" && m.depTime === "--:--") merged.depTime = ex.depTime;
-      if (ex.arrTime !== "--:--" && m.arrTime === "--:--") merged.arrTime = ex.arrTime;
-      if (!m.aircraft && ex.aircraft) merged.aircraft = ex.aircraft;
-      merged._raw = f;
-      flightMap.set(m.flightNum, merged);
-    }
+    const depIata = f.departure?.airport?.iata;
+    // Cancelled flights often have no departure airport populated — keep them anyway
+    if (depIata && depIata !== originIata) return;
+    upsert(f, originIata, destIata);
   });
 
+  const now = new Date();
+
   return [...flightMap.values()]
-    .map(({ _raw, ...rest }) => rest)
+    .map(({ _raw, _score, ...rest }) => {
+      // Smart status inference:
+      // If API still says IN_AIR but the flight departed >3h ago, it has almost
+      // certainly landed — the API just hasn't updated. Mark as COMPLETED.
+      if (rest.status === "IN_AIR" && rest.depDate && rest.depTime !== "--:--") {
+        const depMs = new Date(`${rest.depDate}T${rest.depTime}`).getTime();
+        const ageHours = (now.getTime() - depMs) / 3600000;
+        if (ageHours > 3) rest.status = "COMPLETED";
+      }
+      return rest;
+    })
     .sort((a, b) => {
       if (a.depTime === "--:--") return 1;
       if (b.depTime === "--:--") return -1;
@@ -302,27 +314,66 @@ function buildFlights(departures, arrivals, originIata, destIata) {
 function calcStats(flights) {
   const landed    = flights.filter(f => f.status === "LANDED").length;
   const inAir     = flights.filter(f => f.status === "IN_AIR").length;
+  const completed = flights.filter(f => f.status === "COMPLETED").length;
   const cancelled = flights.filter(f => f.status === "CANCELLED").length;
   const delayed   = flights.filter(f => f.status === "DELAYED").length;
   const scheduled = flights.filter(f => ["SCHEDULED","BOARDING"].includes(f.status)).length;
-  const operated  = landed + inAir + delayed;
+  const operated  = landed + inAir + completed + delayed;
   const total     = operated + cancelled;
-  return { successRate: total > 0 ? Math.round((operated / total) * 100) : 0, landed, inAir, cancelled, delayed, scheduled, total };
+  return { successRate: total > 0 ? Math.round((operated / total) * 100) : 0, landed, inAir, completed, cancelled, delayed, scheduled, total };
 }
 
 function calcAirlineStats(flights) {
   const map = {};
   flights.forEach(f => {
-    if (!map[f.airlineName]) map[f.airlineName] = { name: f.airlineName, code: f.airlineCode, total: 0, landed: 0, inAir: 0, cancelled: 0, delayed: 0 };
+    if (!map[f.airlineName]) map[f.airlineName] = { name: f.airlineName, code: f.airlineCode, total: 0, landed: 0, inAir: 0, cancelled: 0, delayed: 0, completed: 0 };
     map[f.airlineName].total++;
     if (f.status === "LANDED")    map[f.airlineName].landed++;
     if (f.status === "IN_AIR")    map[f.airlineName].inAir++;
     if (f.status === "CANCELLED") map[f.airlineName].cancelled++;
     if (f.status === "DELAYED")   map[f.airlineName].delayed++;
+    if (f.status === "COMPLETED") map[f.airlineName].completed++;
   });
   return Object.values(map)
-    .map(a => ({ ...a, rate: a.total > 0 ? Math.round(((a.landed + a.inAir) / a.total) * 100) : 0 }))
+    .map(a => {
+      const operated = a.landed + a.inAir + a.completed + a.delayed;
+      return { ...a, rate: a.total > 0 ? Math.round((operated / a.total) * 100) : 0 };
+    })
     .sort((a, b) => b.rate - a.rate);
+}
+
+// Auto fly-score: derive probability from historical data without calling Groq
+// Used to pre-populate predictions on future flights without user clicking anything
+function calcFlyScores(futureFlights, historicalFlights, airlineStatsMap) {
+  const routeStats = calcStats(historicalFlights);
+  return futureFlights.map(f => {
+    const airline = airlineStatsMap[f.airlineName];
+    const airlineRate  = airline ? airline.rate : routeStats.successRate;
+    const totalSamples = airline ? airline.total : routeStats.total;
+
+    // Weight: blend airline rate with route rate based on sample size
+    const weight       = Math.min(totalSamples / 10, 1); // full weight at 10+ samples
+    const blended      = Math.round(weight * airlineRate + (1 - weight) * routeStats.successRate);
+
+    // Penalty factors
+    let score = blended;
+    if (f.status === "DELAYED") score = Math.max(score - 15, 10);
+    const cancelledSameTime = historicalFlights.filter(h =>
+      h.airlineName === f.airlineName &&
+      h.status === "CANCELLED" &&
+      h.depTime && f.depTime &&
+      Math.abs(parseInt(h.depTime) - parseInt(f.depTime)) <= 1
+    ).length;
+    if (cancelledSameTime > 0) score = Math.max(score - 10 * cancelledSameTime, 5);
+
+    return {
+      flightNum:        f.flightNum,
+      flyProbability:   Math.min(score, 99),
+      cancelProbability: Math.max(100 - score, 1),
+      confidence:       totalSamples >= 5 ? "medium" : "low",
+      basedOn:          `${totalSamples} historical flights`,
+    };
+  });
 }
 
 // ── AI Prediction (Groq — free, no AeroDataBox units consumed) ────────
@@ -447,7 +498,15 @@ app.get("/api/future", async (req, res) => {
   const flights = buildFlights(origDeps, destArrs, o, d)
     .filter(f => ["SCHEDULED","BOARDING","DELAYED"].includes(f.status));
 
-  const payload = { origin: oAp, destination: dAp, flights, window: "next 24h" };
+  // Auto-compute fly scores from cached historical data — no Groq call needed
+  const historicalCached  = getCached(`route-${o}-${d}`, HISTORICAL_TTL);
+  const historicalFlights = historicalCached?.flights || [];
+  const airlineStatsMap   = Object.fromEntries(
+    calcAirlineStats(historicalFlights).map(a => [a.name, a])
+  );
+  const flyScores = calcFlyScores(flights, historicalFlights, airlineStatsMap);
+
+  const payload = { origin: oAp, destination: dAp, flights, flyScores, window: "next 24h" };
   setCache(futureCacheKey, payload);
   res.json(payload);
 });
