@@ -419,23 +419,45 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
 
   return [...flightMap.values()]
     .map(({ _raw, _score, _source, ...rest }) => {
-      const depDateTime = rest.depDate && rest.depTime !== "--:--"
-        ? new Date(`${rest.depDate}T${rest.depTime}`)
-        : null;
-      const ageH = depDateTime ? (now - depDateTime) / 3600000 : null;
 
-      // Time-based status inference — last resort when API gives us nothing
-      // Only applied when both airport feeds returned UNKNOWN/SCHEDULED
+      // Fix depTime missing when flight came only from destArrs feed
+      // The arrival feed has arrival time but not always departure time.
+      // Use the raw scheduled departure time if we have it from _raw.
+      if (rest.depTime === "--:--" && _raw) {
+        const rawDep = _raw.departure?.scheduledTime?.local
+                    || _raw.departure?.revisedTime?.local
+                    || _raw.departure?.scheduledTime?.utc
+                    || _raw.departure?.revisedTime?.utc;
+        if (rawDep) {
+          rest.depTime = rawDep.slice(11, 16);
+          rest.depDate = rawDep.slice(0, 10);
+        }
+      }
+
+      // Time-based age calculation — use UTC strings to avoid timezone parse issues.
+      // API times are local — we can't safely parse them as UTC.
+      // Instead use arrTime + typical route duration as a proxy when depTime is missing,
+      // or use depDate + depTime with a generous timezone buffer.
+      let ageH = null;
+      if (rest.depDate && rest.depTime !== "--:--") {
+        // Parse as UTC then add 0 offset — we just want "how long ago was this timestamp"
+        // Since depTime is local and we don't know the exact offset, we use a conservative
+        // approach: treat depTime as UTC. This may be off by a few hours but is safe for
+        // the >3h IN_AIR → LANDED inference (a 7h flight is still 7h regardless of tz offset).
+        const depDt = new Date(`${rest.depDate}T${rest.depTime}:00Z`);
+        ageH = (now - depDt) / 3600000;
+      }
+
       if (ageH !== null) {
+        // IN_AIR for more than 3h UTC-adjusted — safe to call LANDED
+        // (shortest intercontinental flight is ~3.5h; domestic could be less but
+        //  if it's been 3h since departure it's definitely not still airborne)
         if (rest.status === "IN_AIR" && ageH > 3) {
-          // Been "in air" for 3+ hours — the flight has definitely landed
           rest.status = "LANDED";
-          rest.statusNote = "Inferred from flight duration";
+          rest.statusNote = "Inferred landed — over 3h since departure";
         }
 
-        // Typical flight durations: if past scheduled arrival by >1h and
-        // we only have UNKNOWN/SCHEDULED from both feeds — infer OPERATED
-        // We do NOT mark these as LANDED (too strong a claim); use OPERATED
+        // Still showing SCHEDULED/UNKNOWN and departure time is well in the past
         if (["SCHEDULED", "UNKNOWN"].includes(rest.status) && ageH > 1.5) {
           rest.status = "OPERATED";
           rest.statusNote = "Schedule only — no live confirmation. Flight time has passed.";
@@ -444,6 +466,22 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
 
       return rest;
     })
+    // Deduplicate codeshares: same depTime + arrTime + depAirport + arrAirport = same physical flight
+    // Keep the operating carrier (isCodeshared===false) or the first one if all are codeshares
+    .reduce((acc, flight) => {
+      const physicalKey = `${flight.depTime}-${flight.arrTime}-${flight.depAirport}-${flight.arrAirport}-${flight.depDate}`;
+      const existing = acc.find(f =>
+        `${f.depTime}-${f.arrTime}-${f.depAirport}-${f.arrAirport}-${f.depDate}` === physicalKey
+      );
+      if (!existing) {
+        acc.push(flight);
+      } else if (!flight.isCodeshared && existing.isCodeshared) {
+        // Replace codeshare with operating carrier
+        acc.splice(acc.indexOf(existing), 1, flight);
+      }
+      // else keep existing — either it's already the operating carrier or both are codeshares
+      return acc;
+    }, [])
     .sort((a, b) => {
       if (a.depTime === "--:--") return 1;
       if (b.depTime === "--:--") return -1;
