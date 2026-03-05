@@ -469,9 +469,9 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
       return rest;
     })
     // Deduplicate codeshares: same depTime + arrTime + route = same physical flight.
-    // AeroDataBox often marks none as isCodeshared=true, so we use airline priority instead.
-    // Priority: prefer the airline whose IATA code matches the flight number prefix.
-    // e.g. EK1 → EK is operating carrier; QF8001 on same flight = codeshare.
+    // Scoring: prefer flight whose number has fewer digits (EK1 > GA8865 > QF8001)
+    // — operating carriers typically use low flight numbers, codeshares use 4-digit numbers.
+    // Also prefer non-codeshared flag and matching prefix.
     .reduce((acc, flight) => {
       const physicalKey = `${flight.depTime}-${flight.arrTime}-${flight.depAirport}-${flight.arrAirport}-${flight.depDate}`;
       const existingIdx = acc.findIndex(f =>
@@ -479,18 +479,15 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
       );
       if (existingIdx === -1) {
         acc.push(flight);
-      } else {
-        const existing = acc[existingIdx];
-        // Check if new flight's airlineCode matches its own flight number prefix
-        // e.g. flightNum "EK 1" starts with "EK" → operating carrier
-        const newIsOp  = flight.flightNum.replace(/\s/g,"").startsWith(flight.airlineCode);
-        const exIsOp   = existing.flightNum.replace(/\s/g,"").startsWith(existing.airlineCode);
-        // Also prefer non-codeshared if flagged
-        const newScore = (newIsOp ? 2 : 0) + (!flight.isCodeshared ? 1 : 0);
-        const exScore  = (exIsOp  ? 2 : 0) + (!existing.isCodeshared ? 1 : 0);
-        if (newScore > exScore) {
-          acc.splice(existingIdx, 1, flight);
-        }
+        return acc;
+      }
+      const existing = acc[existingIdx];
+      // Extract numeric part of flight number — lower = more likely operating carrier
+      const numDigits = fn => (fn.match(/\d+/) || ["9999"])[0].length;
+      const prefixMatch = f => f.flightNum.replace(/\s/g,"").toUpperCase().startsWith(f.airlineCode.toUpperCase()) ? 1 : 0;
+      const score = f => (10 - numDigits(f.flightNum)) + prefixMatch(f) * 2 + (!f.isCodeshared ? 1 : 0);
+      if (score(flight) > score(existing)) {
+        acc.splice(existingIdx, 1, flight);
       }
       return acc;
     }, [])
@@ -502,26 +499,58 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
 }
 
 // ── Re-evaluate time-based statuses at response time ─────────────────
-// This runs on EVERY response (cached or fresh) so IN_AIR flights that
-// have since landed get upgraded even when served from 30min cache.
+// Runs on EVERY response (cached or fresh) so IN_AIR flights that have
+// since landed get upgraded even when served from 30min cache.
 function refreshStatuses(flights) {
-  const now = new Date();
+  const nowUtc = Date.now(); // ms since epoch, always UTC
+
   return flights.map(f => {
     if (!["IN_AIR", "SCHEDULED", "UNKNOWN", "OPERATED"].includes(f.status)) return f;
-    if (!f.depDate || f.depTime === "--:--") return f;
-    // depTime is airport local time. We don't know exact offset but treating as UTC
-    // is safe: DXB is UTC+4, so "08:13 local" = "04:13 UTC". If we treat it as UTC
-    // we get ageH = now_utc - 04:13 which is LARGER than true age. Conservative = safe.
-    const depDt = new Date(`${f.depDate}T${f.depTime}:00Z`);
-    const ageH  = (now - depDt) / 3600000;
+
+    // Strategy: use arrTime to determine "should have landed by now"
+    // This avoids the timezone ambiguity of depTime entirely.
+    // arrTime from AeroDataBox is local time at destination — we don't know offset,
+    // but we can use depDate + arrTime as a conservative bound.
+    // If arrTime is in the past even when treated as UTC (i.e. UTC time > scheduled arr),
+    // then the flight has DEFINITELY landed (UTC < local, so actual local arr is even earlier).
+    let arrDt = null;
+    if (f.depDate && f.arrTime && f.arrTime !== "--:--") {
+      // Handle overnight flights: if arrTime < depTime, arrival is next day
+      const arrDateStr = f.depDate;
+      arrDt = new Date(`${arrDateStr}T${f.arrTime}:00Z`);
+      // If arrTime (as UTC) < depTime (as UTC) the flight crosses midnight — add 1 day
+      if (f.depTime && f.depTime !== "--:--") {
+        const depDt = new Date(`${f.depDate}T${f.depTime}:00Z`);
+        if (arrDt < depDt) arrDt = new Date(arrDt.getTime() + 86400000);
+      }
+    }
+
+    // Also compute depTime age for SCHEDULED/UNKNOWN inference
+    let depAgeH = null;
+    if (f.depDate && f.depTime && f.depTime !== "--:--") {
+      const depDt = new Date(`${f.depDate}T${f.depTime}:00Z`);
+      depAgeH = (nowUtc - depDt) / 3600000;
+    }
+
+    const arrAgeH = arrDt ? (nowUtc - arrDt) / 3600000 : null;
     const updated = { ...f };
-    if (updated.status === "IN_AIR" && ageH > 3) {
-      updated.status = "LANDED";
-      updated.statusNote = "Inferred landed — over 3h since departure";
-    } else if (["SCHEDULED", "UNKNOWN"].includes(updated.status) && ageH > 1.5) {
+
+    if (updated.status === "IN_AIR") {
+      // If scheduled arrival time has passed (even treating it as UTC) → definitely landed
+      // Adding 1h buffer for late arrivals
+      if (arrAgeH !== null && arrAgeH > 1) {
+        updated.status = "LANDED";
+        updated.statusNote = "Inferred landed — past scheduled arrival time";
+      } else if (depAgeH !== null && depAgeH > 14) {
+        // Fallback: 14h since departure — no commercial flight takes this long
+        updated.status = "LANDED";
+        updated.statusNote = "Inferred landed — over 14h since departure";
+      }
+    } else if (["SCHEDULED", "UNKNOWN"].includes(updated.status) && depAgeH !== null && depAgeH > 1.5) {
       updated.status = "OPERATED";
       updated.statusNote = "Schedule only — no live confirmation. Flight time has passed.";
     }
+
     return updated;
   });
 }
