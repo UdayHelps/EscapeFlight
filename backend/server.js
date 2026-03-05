@@ -345,28 +345,27 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
     }
   };
 
-  // Pass 1: Origin departures — filter to flights going to our destination.
-  // AeroDataBox sometimes populates arrival.airport.icao but not .iata, so check both.
-  // Also keep flights where arrival airport is completely missing — we can't rule them out,
-  // and the ICAO → IATA lookup will fill the gap via AIRPORT_DB.
+  // Pass 1: Origin departures — filter STRICTLY to flights going to our destination.
   origDeps.forEach(f => {
     const arrIata = f.arrival?.airport?.iata;
     const arrIcao = f.arrival?.airport?.icao;
-    const arrName = f.arrival?.airport?.name || "";
-    // Reject only if we have a confirmed IATA that is NOT our destination
+    if (!arrIata && !arrIcao) return; // no destination info — reject
     if (arrIata && arrIata !== destIata) return;
-    // Also reject if ICAO is set and doesn't match destination ICAO
     if (!arrIata && arrIcao && arrIcao !== dAp?.icao) return;
     upsert(f, originIata, destIata, "origin-dep");
   });
 
-  // Pass 2: Destination arrivals — filter to flights coming from our origin.
+  // Pass 2: Destination arrivals — filter STRICTLY to flights from our origin.
+  // When depIata is null AND depIcao is null, we can't confirm origin — REJECT.
+  // These are usually domestic connecting flights that bleed into the BOM arrivals feed.
+  // Only accept: confirmed depIata === origin, OR depIcao === origin ICAO.
   destArrs.forEach(f => {
     const depIata = f.departure?.airport?.iata;
     const depIcao = f.departure?.airport?.icao;
-    // Reject only if we have a confirmed IATA that is NOT our origin
-    if (depIata && depIata !== originIata) return;
-    if (!depIata && depIcao && depIcao !== oAp?.icao) return;
+    // Must have EITHER matching IATA or matching ICAO — if both are absent, skip
+    if (!depIata && !depIcao) return; // no origin info — could be anything, reject
+    if (depIata && depIata !== originIata) return; // confirmed different origin
+    if (!depIata && depIcao && depIcao !== oAp?.icao) return; // ICAO doesn't match
     upsert(f, originIata, destIata, "dest-arr");
   });
 
@@ -555,14 +554,16 @@ function refreshStatuses(flights) {
   });
 }
 function calcStats(flights) {
-  const landed    = flights.filter(f => f.status === "LANDED").length;
-  const inAir     = flights.filter(f => f.status === "IN_AIR").length;
-  const operated  = flights.filter(f => f.status === "OPERATED").length;   // inferred
-  const completed = flights.filter(f => f.status === "COMPLETED").length;
-  const cancelled = flights.filter(f => f.status === "CANCELLED").length;
-  const delayed   = flights.filter(f => f.status === "DELAYED").length;
-  const diverted  = flights.filter(f => f.status === "DIVERTED").length;
-  const scheduled = flights.filter(f => ["SCHEDULED","BOARDING"].includes(f.status)).length;
+  // Exclude UNKNOWN status from all stats — these are unconfirmed/unrelated flights
+  const known     = flights.filter(f => f.status !== "UNKNOWN");
+  const landed    = known.filter(f => f.status === "LANDED").length;
+  const inAir     = known.filter(f => f.status === "IN_AIR").length;
+  const operated  = known.filter(f => f.status === "OPERATED").length;
+  const completed = known.filter(f => f.status === "COMPLETED").length;
+  const cancelled = known.filter(f => f.status === "CANCELLED").length;
+  const delayed   = known.filter(f => f.status === "DELAYED").length;
+  const diverted  = known.filter(f => f.status === "DIVERTED").length;
+  const scheduled = known.filter(f => ["SCHEDULED","BOARDING"].includes(f.status)).length;
   const unknown   = flights.filter(f => f.status === "UNKNOWN").length;
   const totalOperated = landed + inAir + operated + completed + delayed + diverted;
   const total     = totalOperated + cancelled;
