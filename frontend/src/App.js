@@ -106,8 +106,8 @@ function PredictionPanel({flight,prediction}){
   );
 }
 
-// FIX: FlightTable renders PredictionPanel inline per row, no more single shared panel
-function FlightTable({flights,onPredict,predictions,loadingPrediction}){
+// Historical table — no AI column, just clean flight data
+function FlightTable({flights}){
   if(!flights||flights.length===0)
     return <div style={{padding:40,textAlign:"center",color:"#334155",fontSize:12}}>No flights in this window.</div>;
   return(
@@ -115,7 +115,41 @@ function FlightTable({flights,onPredict,predictions,loadingPrediction}){
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:500}}>
         <thead>
           <tr style={{borderBottom:"1px solid #0f172a"}}>
-            {["FLIGHT","AIRLINE","DEP","ARR","AIRCRAFT","STATUS","AI"].map(h=>(
+            {["FLIGHT","AIRLINE","DEP","ARR","AIRCRAFT","STATUS"].map(h=>(
+              <th key={h} style={{padding:"9px 12px",textAlign:"left",color:"#334155",fontSize:9,letterSpacing:"2px",fontWeight:"normal",whiteSpace:"nowrap"}}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {flights.map((f,i)=>(
+            <tr key={`${f.flightNum}-${i}`}
+              style={{borderBottom:"1px solid #0f172a44",background:i%2===0?"#080f1e":"#040a14"}}
+              onMouseEnter={e=>e.currentTarget.style.background="#0f172a"}
+              onMouseLeave={e=>e.currentTarget.style.background=i%2===0?"#080f1e":"#040a14"}>
+              <td style={{padding:"9px 12px",color:"#22d3ee",fontWeight:"bold",fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>{f.flightNum}</td>
+              <td style={{padding:"9px 12px",color:"#94a3b8",maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.airlineName}</td>
+              <td style={{padding:"9px 12px",color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>{f.depTime}</td>
+              <td style={{padding:"9px 12px",color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>{f.arrTime}</td>
+              <td style={{padding:"9px 12px",color:"#475569",fontSize:10,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.aircraft||"—"}</td>
+              <td style={{padding:"9px 12px",whiteSpace:"nowrap"}}><StatusBadge status={f.status}/></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Future table — has predict button since these are actionable upcoming flights
+function FutureFlightTable({flights,onPredict,predictions,loadingPrediction}){
+  if(!flights||flights.length===0)
+    return <div style={{padding:40,textAlign:"center",color:"#334155",fontSize:12}}>No upcoming flights found.</div>;
+  return(
+    <div style={{overflowX:"auto"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:500}}>
+        <thead>
+          <tr style={{borderBottom:"1px solid #0f172a"}}>
+            {["FLIGHT","AIRLINE","DEP","ARR","AIRCRAFT","STATUS","PREDICT"].map(h=>(
               <th key={h} style={{padding:"9px 12px",textAlign:"left",color:"#334155",fontSize:9,letterSpacing:"2px",fontWeight:"normal",whiteSpace:"nowrap"}}>{h}</th>
             ))}
           </tr>
@@ -123,37 +157,29 @@ function FlightTable({flights,onPredict,predictions,loadingPrediction}){
         <tbody>
           {flights.map((f,i)=>{
             const pred=predictions[f.flightNum];
-            const isAirborne=f.status==="IN_AIR";
             return(
               <React.Fragment key={`${f.flightNum}-${i}`}>
                 <tr style={{borderBottom:"1px solid #0f172a44",background:i%2===0?"#080f1e":"#040a14"}}
                   onMouseEnter={e=>e.currentTarget.style.background="#0f172a"}
                   onMouseLeave={e=>e.currentTarget.style.background=i%2===0?"#080f1e":"#040a14"}>
                   <td style={{padding:"9px 12px",color:"#22d3ee",fontWeight:"bold",fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>{f.flightNum}</td>
-                  <td style={{padding:"9px 12px",color:"#94a3b8",maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.airlineName}</td>
+                  <td style={{padding:"9px 12px",color:"#94a3b8",maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.airlineName}</td>
                   <td style={{padding:"9px 12px",color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>{f.depTime}</td>
                   <td style={{padding:"9px 12px",color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>{f.arrTime}</td>
                   <td style={{padding:"9px 12px",color:"#475569",fontSize:10,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.aircraft||"—"}</td>
                   <td style={{padding:"9px 12px",whiteSpace:"nowrap"}}><StatusBadge status={f.status}/></td>
                   <td style={{padding:"9px 12px"}}>
-                    {isAirborne?(
-                      <span style={{fontSize:10,color:"#60a5fa"}}>✈ AIRBORNE</span>
-                    ):f.status==="LANDED"?(
-                      <span style={{fontSize:10,color:"#4ade80"}}>✓ LANDED</span>
-                    ):f.status==="CANCELLED"?(
-                      <span style={{fontSize:10,color:"#f87171"}}>✗ CANCELLED</span>
-                    ):pred?(
-                      <span style={{fontSize:10,color:pred.flyProbability>=70?"#4ade80":pred.flyProbability>=50?"#facc15":"#f87171",fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{pred.flyProbability}% fly</span>
+                    {pred?(
+                      <span style={{fontSize:11,color:pred.flyProbability>=70?"#4ade80":pred.flyProbability>=50?"#facc15":"#f87171",fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{pred.flyProbability}%</span>
                     ):(
                       <button onClick={()=>onPredict(f)}
                         disabled={loadingPrediction===f.flightNum}
-                        style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:4,padding:"3px 8px",color:"#f97316",fontSize:10,cursor:"pointer",whiteSpace:"nowrap"}}>
-                        {loadingPrediction===f.flightNum?"...":" AI ▸"}
+                        style={{background:"#0f172a",border:"1px solid #f97316",borderRadius:4,padding:"3px 10px",color:"#f97316",fontSize:10,cursor:"pointer",whiteSpace:"nowrap",opacity:loadingPrediction===f.flightNum?0.5:1}}>
+                        {loadingPrediction===f.flightNum?"...":"PREDICT"}
                       </button>
                     )}
                   </td>
                 </tr>
-                {/* FIX: Prediction panel renders immediately below its own row */}
                 {pred&&<PredictionPanel flight={f} prediction={pred}/>}
               </React.Fragment>
             );
@@ -409,9 +435,8 @@ export default function App(){
 
                 <div style={{display:"flex",gap:4,marginBottom:12,overflowX:"auto",paddingBottom:2}}>
                   {[
-                    {id:"24h",label:"Last 12h",count:last24h.filter(f=>f.depTime!=="--:--").length},
-                    {id:"48h",label:"Prev 12h",count:prev24h.filter(f=>f.depTime!=="--:--").length},
-                    {id:"future",label:"Next 12h",count:futureFlights.length,future:true},
+                    {id:"24h",label:"Last 24h",count:last24h.length},
+                    {id:"future",label:"Next 24h",count:futureFlights.length,future:true},
                     {id:"airlines",label:"Airlines"},
                   ].map(tab=>(
                     <button key={tab.id}
@@ -430,25 +455,16 @@ export default function App(){
                 {activeTab==="24h"&&(
                   <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
                     <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>
-                      ▸ LAST 12H · {last24h.length} FLIGHTS
+                      ▸ LAST 24H · {last24h.length} FLIGHTS
                     </div>
-                    <FlightTable flights={last24h} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
-                  </div>
-                )}
-
-                {activeTab==="48h"&&(
-                  <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
-                    <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>
-                      ▸ PREV 12H · {prev24h.length} FLIGHTS
-                    </div>
-                    <FlightTable flights={prev24h} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
+                    <FlightTable flights={last24h}/>
                   </div>
                 )}
 
                 {activeTab==="future"&&(
                   <div className="fade-in" style={{background:"#080f1e",border:"1px solid #0f172a",borderRadius:12,overflow:"hidden"}}>
                     <div style={{padding:"9px 14px",borderBottom:"1px solid #0f172a",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <span style={{fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>▸ NEXT 12H · {futureFlights.length} SCHEDULED</span>
+                      <span style={{fontSize:9,color:"#334155",letterSpacing:"3px",fontFamily:"'JetBrains Mono',monospace"}}>▸ NEXT 24H · {futureFlights.length} SCHEDULED</span>
                       <button onClick={loadFuture} disabled={futureLoading}
                         style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:5,padding:"3px 10px",color:"#f97316",fontSize:10}}>
                         {futureLoading?"loading...":"↻ refresh"}
@@ -461,9 +477,9 @@ export default function App(){
                       </div>
                     ):(
                       <>
-                        <FlightTable flights={futureFlights} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
+                        <FutureFlightTable flights={futureFlights} onPredict={handlePredict} predictions={predictions} loadingPrediction={loadingPrediction}/>
                         <div style={{padding:"10px 14px",borderTop:"1px solid #0f172a",fontSize:10,color:"#1e293b"}}>
-                          Scheduled flights sourced from AeroDataBox live schedule data
+                          Scheduled flights from AeroDataBox · next 24h
                         </div>
                       </>
                     )}
