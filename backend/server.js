@@ -437,17 +437,17 @@ app.get("/api/future", async (req, res) => {
     return res.json({ ...futureCached, fromCache: true });
   }
 
-  // Next 12h = 1 window × 2 airports = 2 calls = 4 units
-  console.log(`[Future] ${o}→${d} | ~4 units`);
+  // Next 24h = 2 windows × 2 airports = 4 calls = 8 units
+  console.log(`[Future] ${o}→${d} | ~8 units`);
   const [origDeps, destArrs] = await Promise.all([
-    fetchTimeRange(oAp.icao, "Departure", 0, 12, false),
-    fetchTimeRange(dAp.icao, "Arrival",   0, 12, false),
+    fetchTimeRange(oAp.icao, "Departure", 0, 24, false),
+    fetchTimeRange(dAp.icao, "Arrival",   0, 24, false),
   ]);
 
   const flights = buildFlights(origDeps, destArrs, o, d)
     .filter(f => ["SCHEDULED","BOARDING","DELAYED"].includes(f.status));
 
-  const payload = { origin: oAp, destination: dAp, flights, window: "next 12h" };
+  const payload = { origin: oAp, destination: dAp, flights, window: "next 24h" };
   setCache(futureCacheKey, payload);
   res.json(payload);
 });
