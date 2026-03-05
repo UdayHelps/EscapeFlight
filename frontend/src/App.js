@@ -368,10 +368,10 @@ export default function App(){
           {/* ── INTRO — 2 lines ── */}
           <div style={{marginBottom:16,paddingBottom:14,borderBottom:`1px solid ${T.border}`}}>
             <p style={{fontSize:13,color:T.textMuted,lineHeight:1.7,marginBottom:3}}>
-              Live flight intelligence for any route — cancellation rates, airline performance &amp; AI-assessed world events.
+              Real-time flight data, cancellation trends &amp; AI-assessed world events — for major international routes.
             </p>
             <p style={{fontSize:12,color:T.textDim,lineHeight:1.5}}>
-              Enter two airport codes to check if your flight will actually fly.
+              Not all routes are available. Start with a busy route for best results.
             </p>
           </div>
 
@@ -525,7 +525,7 @@ export default function App(){
                     <>
                       <FutureFlightTable flights={futureFlights} flyScores={flyScores} T={T}/>
                       <div style={{padding:"8px 12px",borderTop:`1px solid ${T.border}`,
-                        fontSize:10,color:T.textDim2}}>AeroDataBox · next 24h</div>
+                        fontSize:10,color:T.textDim2}}>Scheduled flights · next 24h</div>
                     </>
                   )}
                 </div>
@@ -680,7 +680,7 @@ export default function App(){
                 ))}
               </div>
               <p style={{textAlign:"center",marginTop:14,fontSize:11,color:T.textDim,lineHeight:1.5}}>
-                Live data via AeroDataBox · AI by Groq
+                Data refreshes every few minutes
               </p>
               <p style={{textAlign:"center",marginTop:8,fontSize:11,color:T.textDim,lineHeight:1.5}}>
                 Made with ❤️ by{" "}
