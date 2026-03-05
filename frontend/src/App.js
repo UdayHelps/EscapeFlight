@@ -243,6 +243,7 @@ export default function App(){
   const [activeTab,setActiveTab]=useState("24h");
   const [flyScores,setFlyScores]=useState([]);
   const [eventsExpanded,setEventsExpanded]=useState(false);
+  const [severityFilter,setSeverityFilter]=useState(null);
   const [bragging,setBragging]=useState({flightsTracked:0,cancellationsCaught:0,routesScanned:0});
   const [events,setEvents]=useState([]);
   const [eventsLoading,setEventsLoading]=useState(false);
@@ -320,8 +321,6 @@ export default function App(){
         input{font-family:inherit}
         ::-webkit-scrollbar{width:4px;height:4px}
         ::-webkit-scrollbar-thumb{background:${T.scrollbar};border-radius:2px}
-
-        /* ── Mobile overrides ── */
         @media(max-width:600px){
           .header-time{display:none!important}
           .route-stats{gap:8px!important}
@@ -332,12 +331,13 @@ export default function App(){
         }
       `}</style>
 
-      {/* ── HEADER ── */}
+      {/* HEADER */}
       <header style={{borderBottom:`1px solid ${T.border}`,background:T.bgHeader,
         backdropFilter:"blur(16px)",position:"sticky",top:0,zIndex:100}}>
         <div style={{maxWidth:1200,margin:"0 auto",padding:"10px 14px",
           display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {/* FIX 1: logo clicks to reload */}
+          <div onClick={()=>window.location.reload()} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
             <div style={{width:30,height:30,borderRadius:7,background:"linear-gradient(135deg,#f97316,#dc2626)",
               display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,
               animation:"glow 3s ease infinite",flexShrink:0}}>✈</div>
@@ -365,7 +365,6 @@ export default function App(){
       <div style={{maxWidth:1200,margin:"0 auto",padding:"16px 12px 48px"}}>
         <div className="fade-in">
 
-          {/* ── INTRO — 2 lines ── */}
           <div style={{marginBottom:16,paddingBottom:14,borderBottom:`1px solid ${T.border}`}}>
             <p style={{fontSize:13,color:T.textMuted,lineHeight:1.7,marginBottom:3}}>
               Real-time flight data, cancellation trends &amp; AI-assessed world events — for major international routes.
@@ -375,20 +374,15 @@ export default function App(){
             </p>
           </div>
 
-          {/* ── SEARCH PANEL ── */}
           <div style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:12,
             padding:"14px",marginBottom:14}}>
             <div style={{fontSize:9,color:T.textDim,letterSpacing:"3px",marginBottom:12,
               fontFamily:"'JetBrains Mono',monospace"}}>ROUTE ANALYSIS</div>
-
-            {/* Airport inputs row */}
             <div style={{display:"flex",gap:8,alignItems:"flex-end",marginBottom:10}}>
               <AirportInput label="ORIGIN" value={originInput} onChange={setOriginInput} color={T.cyan} T={T}/>
               <div style={{fontSize:18,color:T.textDim,paddingBottom:12,flexShrink:0}}>→</div>
               <AirportInput label="DESTINATION" value={destInput} onChange={setDestInput} color={T.green} T={T}/>
             </div>
-
-            {/* Search button full-width on mobile */}
             <button onClick={handleSearch} disabled={loading}
               style={{width:"100%",background:loading?"#1e293b":"linear-gradient(135deg,#f97316,#dc2626)",
                 border:"none",borderRadius:8,padding:"11px 16px",color:"#fff",fontSize:12,
@@ -396,11 +390,8 @@ export default function App(){
                 opacity:loading?0.6:1,transition:"opacity 0.2s"}}>
               {loading?"SCANNING...":"CHECK FLIGHTS ▸"}
             </button>
-
             {error&&<div style={{marginTop:10,color:"#f87171",fontSize:12,background:"#2d0f0f",
               padding:"8px 12px",borderRadius:6,border:"1px solid #7f1d1d"}}>⚠ {error}</div>}
-
-            {/* Quick pairs — hidden on small mobile */}
             <div className="quick-pairs" style={{marginTop:10,display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
               <span style={{fontSize:9,color:T.textDim2,fontFamily:"'JetBrains Mono',monospace"}}>QUICK:</span>
               {quickPairs.map(([o,d])=>(
@@ -416,7 +407,6 @@ export default function App(){
             </div>
           </div>
 
-          {/* ── LOADING ── */}
           {loading&&(
             <div style={{textAlign:"center",padding:"50px 20px"}}>
               <div style={{width:32,height:32,border:`3px solid ${T.spinBg}`,borderTop:"3px solid #f97316",
@@ -426,11 +416,8 @@ export default function App(){
             </div>
           )}
 
-          {/* ── RESULTS ── */}
           {!loading&&result&&(
             <div className="fade-in">
-
-              {/* Route header */}
               <div style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:12,
                 padding:"12px 14px",marginBottom:12}}>
                 <div style={{marginBottom:10}}>
@@ -443,8 +430,6 @@ export default function App(){
                     {result.origin?.iata} → {result.destination?.iata} · LAST 24H
                   </div>
                 </div>
-
-                {/* Stats row — wraps cleanly on mobile */}
                 <div className="route-stats" style={{display:"flex",gap:12,flexWrap:"wrap"}}>
                   {[
                     {l:"SUCCESS",v:`${stats?.successRate||0}%`,c:stats?.successRate>=75?"#4ade80":stats?.successRate>=50?"#facc15":"#f87171"},
@@ -464,7 +449,6 @@ export default function App(){
                 </div>
               </div>
 
-              {/* Tabs */}
               <div style={{display:"flex",gap:4,marginBottom:10,overflowX:"auto",paddingBottom:2}}>
                 {[
                   {id:"24h",label:"Last 24h",count:last24h.length},
@@ -571,9 +555,7 @@ export default function App(){
             </div>
           )}
 
-
-
-          {/* ── WORLD EVENTS ── */}
+          {/* WORLD EVENTS */}
           <div style={{marginTop:24}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
               marginBottom:12,flexWrap:"wrap",gap:8}}>
@@ -584,18 +566,28 @@ export default function App(){
                 <div style={{fontSize:9,color:T.textDim,marginTop:2,
                   fontFamily:"'JetBrains Mono',monospace"}}>LIVE NEWS · AI-ASSESSED</div>
               </div>
+              {/* FIX 2: clickable severity filter badges */}
               <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+                {severityFilter&&(
+                  <button onClick={()=>setSeverityFilter(null)}
+                    style={{background:"transparent",border:`1px solid ${T.border2}`,borderRadius:4,
+                      padding:"1px 7px",color:T.textMuted,fontSize:10,letterSpacing:"0.5px"}}>
+                    ✕ all
+                  </button>
+                )}
                 {["S1","S2","S3","S4","S5"].map(s=>{
                   const sv=SEVERITY[s];
                   const count=events.filter(e=>e.severity===s).length;
                   if(count===0)return null;
+                  const active=severityFilter===s;
                   return(
-                    <div key={s} style={{display:"flex",alignItems:"center",gap:3}}>
-                      <span style={{background:sv.bg,color:sv.color,border:`1px solid ${sv.border}`,
-                        fontSize:9,padding:"1px 5px",borderRadius:3,fontFamily:"'JetBrains Mono',monospace",
-                        fontWeight:"bold"}}>{s}</span>
+                    <button key={s} onClick={()=>setSeverityFilter(active?null:s)}
+                      style={{display:"flex",alignItems:"center",gap:3,background:active?sv.bg:"transparent",
+                        border:`1px solid ${active?sv.color:sv.border}`,borderRadius:4,padding:"2px 6px",
+                        outline:"none",transition:"all 0.15s",transform:active?"scale(1.05)":"scale(1)"}}>
+                      <span style={{color:sv.color,fontSize:9,fontFamily:"'JetBrains Mono',monospace",fontWeight:"bold"}}>{s}</span>
                       <span style={{color:T.textDim,fontSize:10}}>{count}</span>
-                    </div>
+                    </button>
                   );
                 })}
                 <button onClick={loadEvents} disabled={eventsLoading}
@@ -619,12 +611,13 @@ export default function App(){
             )}
 
             {!eventsLoading&&events.length>0&&(()=>{
-              const sorted=[
+              const all=[
                 ...events.filter(e=>["S4","S5"].includes(e.severity)),
                 ...events.filter(e=>e.severity==="S3"),
                 ...events.filter(e=>["S1","S2"].includes(e.severity)),
               ];
-              const visible=eventsExpanded?sorted:sorted.slice(0,3);
+              const filtered=severityFilter?all.filter(e=>e.severity===severityFilter):all;
+              const visible=eventsExpanded?filtered:filtered.slice(0,3);
               return(
                 <>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",
@@ -634,14 +627,14 @@ export default function App(){
                         onToggle={()=>setExpandedEvent(expandedEvent===ev.id?null:ev.id)}/>
                     ))}
                   </div>
-                  {sorted.length>3&&(
+                  {filtered.length>3&&(
                     <button onClick={()=>setEventsExpanded(x=>!x)}
                       style={{width:"100%",background:T.bgCard,border:`1px solid ${T.border}`,
                         borderRadius:8,padding:"9px",color:T.textMuted,fontSize:11,
                         fontFamily:"'JetBrains Mono',monospace",letterSpacing:"1px",transition:"all 0.15s"}}
                       onMouseEnter={e=>{e.currentTarget.style.borderColor=T.accent;e.currentTarget.style.color=T.accent}}
                       onMouseLeave={e=>{e.currentTarget.style.borderColor=T.border;e.currentTarget.style.color=T.textMuted}}>
-                      {eventsExpanded?`▲ SHOW LESS`:`▼ ${sorted.length-3} MORE EVENTS`}
+                      {eventsExpanded?`▲ SHOW LESS`:`▼ ${filtered.length-3} MORE EVENTS`}
                     </button>
                   )}
                 </>
@@ -659,7 +652,7 @@ export default function App(){
             )}
           </div>
 
-          {/* ── FOOTER STATS ── */}
+          {/* FOOTER STATS */}
           {bragging.flightsTracked>0&&(
             <div style={{marginTop:44,paddingTop:24,borderTop:`1px solid ${T.border}`}}>
               <div className="footer-stats" style={{display:"flex",justifyContent:"center",
