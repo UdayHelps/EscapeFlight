@@ -229,17 +229,18 @@ function mapStatus(s) {
 
 // ── Flight mapper ─────────────────────────────────────────────────────
 function mapFlight(f, impliedDep, impliedArr) {
-  const flightNum   = f.number || f.callSign || "N/A";
+  const rawNum      = f.number || f.callSign;
   const airlineName = f.airline?.name || "Unknown";
-  const airlineCode = f.airline?.iata || (flightNum.length >= 2 ? flightNum.slice(0, 2) : "??");
+  const airlineCode = f.airline?.iata || (rawNum?.length >= 2 ? rawNum.slice(0, 2) : "??");
+  const depTimeStr  = (f.departure?.revisedTime?.local || f.departure?.scheduledTime?.local
+                    || f.departure?.revisedTime?.utc   || f.departure?.scheduledTime?.utc || "");
+  const flightNum   = rawNum || `${airlineCode}${depTimeStr.slice(11,16).replace(":","") || "???"}`;
   const depAirport  = f.departure?.airport?.iata || impliedDep || "?";
   const arrAirport  = f.arrival?.airport?.iata   || impliedArr || "?";
-  const depTime     = (f.departure?.revisedTime?.local || f.departure?.scheduledTime?.local
-                    || f.departure?.revisedTime?.utc   || f.departure?.scheduledTime?.utc || "")?.slice(11,16) || "--:--";
+  const depTime     = depTimeStr.slice(11,16) || "--:--";
   const arrTime     = (f.arrival?.revisedTime?.local   || f.arrival?.scheduledTime?.local
                     || f.arrival?.revisedTime?.utc     || f.arrival?.scheduledTime?.utc   || "")?.slice(11,16) || "--:--";
-  const depDate     = (f.departure?.revisedTime?.local || f.departure?.scheduledTime?.local
-                    || f.departure?.revisedTime?.utc   || f.departure?.scheduledTime?.utc || "")?.slice(0,10) || null;
+  const depDate     = depTimeStr.slice(0,10) || null;
   return {
     flightNum, airlineCode, airlineName, depTime, arrTime, depDate,
     depAirport, arrAirport,
@@ -266,41 +267,45 @@ function buildFlights(departures, arrivals, originIata, destIata) {
     f.aircraft?.model, f.status,
   ].filter(Boolean).length;
 
-  // Operating carrier beats codeshare marketing entry
   const score = f => (f.isCodeshared ? 0 : 10) + richness(f);
 
+  // Critical fix: when flight number is missing, use airline+depTime as key
+  // so all flights don't collapse into a single "N/A" entry
+  const flightKey = f => {
+    const num = f.number || f.callSign;
+    if (num && num !== "N/A") return num;
+    const dep = f.departure?.scheduledTime?.utc || f.departure?.scheduledTime?.local || "";
+    const al  = f.airline?.iata || f.airline?.name || "UNK";
+    return `${al}-${dep.slice(0,16)}`; // e.g. "SG-2026-03-05T06:30"
+  };
+
   const upsert = (f, impliedDep, impliedArr) => {
-    const m      = mapFlight(f, impliedDep, impliedArr);
-    m._raw       = f;
-    m._score     = score(f);
-    const ex     = flightMap.get(m.flightNum);
-    if (!ex || m._score > ex._score) flightMap.set(m.flightNum, m);
+    const key  = flightKey(f);
+    const m    = mapFlight(f, impliedDep, impliedArr);
+    m._raw     = f;
+    m._score   = score(f);
+    const ex   = flightMap.get(key);
+    if (!ex || m._score > ex._score) flightMap.set(key, m);
   };
 
   departures.forEach(f => {
     const arrIata = f.arrival?.airport?.iata;
-    if (arrIata && arrIata !== destIata) return; // confirmed wrong dest — skip
+    if (arrIata && arrIata !== destIata) return;
     upsert(f, originIata, destIata);
   });
 
   arrivals.forEach(f => {
     const depIata = f.departure?.airport?.iata;
-    // Cancelled flights often have no departure airport populated — keep them anyway
     if (depIata && depIata !== originIata) return;
     upsert(f, originIata, destIata);
   });
 
   const now = new Date();
-
   return [...flightMap.values()]
     .map(({ _raw, _score, ...rest }) => {
-      // Smart status inference:
-      // If API still says IN_AIR but the flight departed >3h ago, it has almost
-      // certainly landed — the API just hasn't updated. Mark as COMPLETED.
       if (rest.status === "IN_AIR" && rest.depDate && rest.depTime !== "--:--") {
-        const depMs = new Date(`${rest.depDate}T${rest.depTime}`).getTime();
-        const ageHours = (now.getTime() - depMs) / 3600000;
-        if (ageHours > 3) rest.status = "COMPLETED";
+        const ageH = (now - new Date(`${rest.depDate}T${rest.depTime}`)) / 3600000;
+        if (ageH > 3) rest.status = "COMPLETED";
       }
       return rest;
     })
