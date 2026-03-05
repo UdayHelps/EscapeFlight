@@ -127,16 +127,12 @@ function loadFallbackAirports() {
 
 // ── Core fetch — single window, max 12h, Tier 2 = 2 units ────────────
 async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = true) {
-  // Round timestamps to nearest hour so calls within the same hour share cache
-  // This prevents debug + routes endpoints generating different keys for same data
-  const roundHour = d => {
-    const r = new Date(d);
-    r.setMinutes(0, 0, 0);
-    return r;
-  };
-  const fmt      = d => d.toISOString().slice(0, 16);
-  const cacheKey = `${icao}-${direction}-${fmt(roundHour(fromDate))}-${fmt(roundHour(toDate))}`;
+  // Use exact minute-level timestamps in cache key (no rounding).
+  // fetchTimeRange already produces stable windows via chunking.
+  const fmt      = d => d.toISOString().slice(0, 13); // round to hour for stable key
+  const cacheKey = `${icao}-${direction}-${fmt(fromDate)}-${fmt(toDate)}`;
   const ttl      = isHistorical ? HISTORICAL_TTL : LIVE_TTL;
+  const fmtFull  = d => d.toISOString().slice(0, 16); // for API URL
   const cached   = getCached(cacheKey, ttl);
   if (cached) {
     console.log(`[Cache HIT] ${cacheKey}`);
@@ -146,7 +142,7 @@ async function fetchWindow(icao, direction, fromDate, toDate, isHistorical = tru
     console.warn(`[Quota GUARD] Not enough units for ${cacheKey} — returning empty`);
     return [];
   }
-  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmt(fromDate)}/${fmt(toDate)}`;
+  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${fmtFull(fromDate)}/${fmtFull(toDate)}`;
   try {
     const resp = await axios.get(url, {
       params: {
@@ -466,20 +462,30 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
 
       return rest;
     })
-    // Deduplicate codeshares: same depTime + arrTime + depAirport + arrAirport = same physical flight
-    // Keep the operating carrier (isCodeshared===false) or the first one if all are codeshares
+    // Deduplicate codeshares: same depTime + arrTime + route = same physical flight.
+    // AeroDataBox often marks none as isCodeshared=true, so we use airline priority instead.
+    // Priority: prefer the airline whose IATA code matches the flight number prefix.
+    // e.g. EK1 → EK is operating carrier; QF8001 on same flight = codeshare.
     .reduce((acc, flight) => {
       const physicalKey = `${flight.depTime}-${flight.arrTime}-${flight.depAirport}-${flight.arrAirport}-${flight.depDate}`;
-      const existing = acc.find(f =>
+      const existingIdx = acc.findIndex(f =>
         `${f.depTime}-${f.arrTime}-${f.depAirport}-${f.arrAirport}-${f.depDate}` === physicalKey
       );
-      if (!existing) {
+      if (existingIdx === -1) {
         acc.push(flight);
-      } else if (!flight.isCodeshared && existing.isCodeshared) {
-        // Replace codeshare with operating carrier
-        acc.splice(acc.indexOf(existing), 1, flight);
+      } else {
+        const existing = acc[existingIdx];
+        // Check if new flight's airlineCode matches its own flight number prefix
+        // e.g. flightNum "EK 1" starts with "EK" → operating carrier
+        const newIsOp  = flight.flightNum.replace(/\s/g,"").startsWith(flight.airlineCode);
+        const exIsOp   = existing.flightNum.replace(/\s/g,"").startsWith(existing.airlineCode);
+        // Also prefer non-codeshared if flagged
+        const newScore = (newIsOp ? 2 : 0) + (!flight.isCodeshared ? 1 : 0);
+        const exScore  = (exIsOp  ? 2 : 0) + (!existing.isCodeshared ? 1 : 0);
+        if (newScore > exScore) {
+          acc.splice(existingIdx, 1, flight);
+        }
       }
-      // else keep existing — either it's already the operating carrier or both are codeshares
       return acc;
     }, [])
     .sort((a, b) => {
@@ -489,7 +495,30 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
     });
 }
 
-// ── Stats ─────────────────────────────────────────────────────────────
+// ── Re-evaluate time-based statuses at response time ─────────────────
+// This runs on EVERY response (cached or fresh) so IN_AIR flights that
+// have since landed get upgraded even when served from 30min cache.
+function refreshStatuses(flights) {
+  const now = new Date();
+  return flights.map(f => {
+    if (!["IN_AIR", "SCHEDULED", "UNKNOWN", "OPERATED"].includes(f.status)) return f;
+    if (!f.depDate || f.depTime === "--:--") return f;
+    // depTime is airport local time. We don't know exact offset but treating as UTC
+    // is safe: DXB is UTC+4, so "08:13 local" = "04:13 UTC". If we treat it as UTC
+    // we get ageH = now_utc - 04:13 which is LARGER than true age. Conservative = safe.
+    const depDt = new Date(`${f.depDate}T${f.depTime}:00Z`);
+    const ageH  = (now - depDt) / 3600000;
+    const updated = { ...f };
+    if (updated.status === "IN_AIR" && ageH > 3) {
+      updated.status = "LANDED";
+      updated.statusNote = "Inferred landed — over 3h since departure";
+    } else if (["SCHEDULED", "UNKNOWN"].includes(updated.status) && ageH > 1.5) {
+      updated.status = "OPERATED";
+      updated.statusNote = "Schedule only — no live confirmation. Flight time has passed.";
+    }
+    return updated;
+  });
+}
 function calcStats(flights) {
   const landed    = flights.filter(f => f.status === "LANDED").length;
   const inAir     = flights.filter(f => f.status === "IN_AIR").length;
@@ -612,7 +641,9 @@ app.get("/api/routes", async (req, res) => {
   const routeCached   = getCached(routeCacheKey, HISTORICAL_TTL);
   if (routeCached) {
     console.log(`[Cache HIT] Route ${o}→${d} — 0 units`);
-    return res.json({ ...routeCached, fromCache: true });
+    const freshened = refreshStatuses(routeCached.flights);
+    const freshStats = calcStats(freshened);
+    return res.json({ ...routeCached, flights: freshened, last24h: freshened, stats: freshStats, fromCache: true });
   }
 
   // ── DUAL-AIRPORT DUAL-DIRECTION STRATEGY ────────────────────────────
@@ -642,8 +673,8 @@ app.get("/api/routes", async (req, res) => {
 
   // All 4 feeds go into buildFlights — it handles merging, status upgrading,
   // destDeps confirmation, and origArrs divert detection internally.
-  const flights = buildFlights(origDeps, destArrs, o, d, destDeps, origArrs, oAp, dAp);
-
+  const rawFlights   = buildFlights(origDeps, destArrs, o, d, destDeps, origArrs, oAp, dAp);
+  const flights      = refreshStatuses(rawFlights);
   const stats        = calcStats(flights);
   const airlineStats = calcAirlineStats(flights);
 
