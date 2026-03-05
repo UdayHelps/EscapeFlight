@@ -290,7 +290,7 @@ function flightKey(f) {
 //   - This gives us real LANDED/CANCELLED without relying on a single airport's
 //     live feed, which may have poor coverage.
 // ─────────────────────────────────────────────────────────────────────
-function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], origArrs = []) {
+function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], origArrs = [], oAp = null, dAp = null) {
   // richness score: how much data does this raw flight object actually have?
   const richness = f => [
     f.departure?.airport?.iata, f.arrival?.airport?.iata,
@@ -336,18 +336,28 @@ function buildFlights(origDeps, destArrs, originIata, destIata, destDeps = [], o
     }
   };
 
-  // Pass 1: Origin departures — flights leaving the origin airport bound for destination
+  // Pass 1: Origin departures — filter to flights going to our destination.
+  // AeroDataBox sometimes populates arrival.airport.icao but not .iata, so check both.
+  // Also keep flights where arrival airport is completely missing — we can't rule them out,
+  // and the ICAO → IATA lookup will fill the gap via AIRPORT_DB.
   origDeps.forEach(f => {
     const arrIata = f.arrival?.airport?.iata;
-    if (arrIata && arrIata !== destIata) return; // filter to our route
+    const arrIcao = f.arrival?.airport?.icao;
+    const arrName = f.arrival?.airport?.name || "";
+    // Reject only if we have a confirmed IATA that is NOT our destination
+    if (arrIata && arrIata !== destIata) return;
+    // Also reject if ICAO is set and doesn't match destination ICAO
+    if (!arrIata && arrIcao && arrIcao !== dAp?.icao) return;
     upsert(f, originIata, destIata, "origin-dep");
   });
 
-  // Pass 2: Destination arrivals — flights arriving at destination from origin
-  // KEY FEED: arrival status at destination is far more reliable for live confirmation
+  // Pass 2: Destination arrivals — filter to flights coming from our origin.
   destArrs.forEach(f => {
     const depIata = f.departure?.airport?.iata;
-    if (depIata && depIata !== originIata) return; // filter to our route
+    const depIcao = f.departure?.airport?.icao;
+    // Reject only if we have a confirmed IATA that is NOT our origin
+    if (depIata && depIata !== originIata) return;
+    if (!depIata && depIcao && depIcao !== oAp?.icao) return;
     upsert(f, originIata, destIata, "dest-arr");
   });
 
@@ -587,7 +597,7 @@ app.get("/api/routes", async (req, res) => {
 
   // All 4 feeds go into buildFlights — it handles merging, status upgrading,
   // destDeps confirmation, and origArrs divert detection internally.
-  const flights = buildFlights(origDeps, destArrs, o, d, destDeps, origArrs);
+  const flights = buildFlights(origDeps, destArrs, o, d, destDeps, origArrs, oAp, dAp);
 
   const stats        = calcStats(flights);
   const airlineStats = calcAirlineStats(flights);
@@ -621,8 +631,13 @@ app.get("/api/routes", async (req, res) => {
       rawArrsAtDest:      destArrs.length,
       rawDepsFromDest:    destDeps.length,
       matched:            flights.length,
+      // How many origDeps had no arrival IATA (common in AeroDataBox — may be our route)
+      origDepsNullArrIata: origDeps.filter(f => !f.arrival?.airport?.iata).length,
+      origDepsToOurDest:   origDeps.filter(f => f.arrival?.airport?.iata === d).length,
+      destArrsNullDepIata: destArrs.filter(f => !f.departure?.airport?.iata).length,
+      destArrsFromOurOrig: destArrs.filter(f => f.departure?.airport?.iata === o).length,
       strategy:           "dual-airport-dual-direction",
-      unitsThisCall:      16,
+      unitsThisCall:      QUOTA.used - (QUOTA.used - 16 < 0 ? 0 : QUOTA.used - 16),
       sessionTotal:       QUOTA.used,
     },
   };
@@ -787,6 +802,110 @@ app.get("/api/quota", (req, res) => {
     percentUsed:           Math.round((QUOTA.used / QUOTA.MONTHLY_UNIT_LIMIT) * 100),
     estimatedSearchesLeft: Math.floor(remaining / 16),
   });
+});
+
+// /api/debug — inspect raw feed data for a route without building flights
+// Shows sample of raw flights from each feed to diagnose matching issues
+app.get("/api/debug", async (req, res) => {
+  await loadAirportDB();
+  const { origin, destination } = req.query;
+  if (!origin || !destination) return res.status(400).json({ error: "origin and destination required" });
+  const o   = origin.trim().toUpperCase();
+  const d   = destination.trim().toUpperCase();
+  const oAp = AIRPORT_DB[o], dAp = AIRPORT_DB[d];
+  if (!oAp || !dAp) return res.status(400).json({ error: "Airport not found" });
+
+  // Pull from cache — free, no quota cost
+  const origDepsCached = getCached(`${oAp.icao}-Departure-${new Date(Date.now() - 24*3600000).toISOString().slice(0,16)}-${new Date().toISOString().slice(0,16)}`, HISTORICAL_TTL);
+
+  // Fetch fresh if not cached (uses quota)
+  const [origDeps, destArrs] = await Promise.all([
+    fetchTimeRange(oAp.icao, "Departure", 24, 0, true),
+    fetchTimeRange(dAp.icao, "Arrival",   24, 0, true),
+  ]);
+
+  // Sample flights going to our destination from origDeps
+  const toDestSample = origDeps
+    .filter(f => {
+      const arr = f.arrival?.airport?.iata;
+      return !arr || arr === d; // include flights with no arrival iata too
+    })
+    .slice(0, 20)
+    .map(f => ({
+      num:       f.number || f.callSign,
+      airline:   f.airline?.name,
+      depIata:   f.departure?.airport?.iata,
+      arrIata:   f.arrival?.airport?.iata,   // KEY: is this populated?
+      depTime:   f.departure?.scheduledTime?.local,
+      status:    f.status,
+      isCS:      f.isCodeshared,
+    }));
+
+  // How many origDeps have null arrIata?
+  const nullArrIata   = origDeps.filter(f => !f.arrival?.airport?.iata).length;
+  const matchedToD    = origDeps.filter(f => f.arrival?.airport?.iata === d).length;
+  const toOtherDest   = origDeps.filter(f => f.arrival?.airport?.iata && f.arrival.airport.iata !== d).length;
+
+  // Sample from destArrs
+  const fromOriginSample = destArrs
+    .filter(f => {
+      const dep = f.departure?.airport?.iata;
+      return !dep || dep === o;
+    })
+    .slice(0, 20)
+    .map(f => ({
+      num:     f.number || f.callSign,
+      airline: f.airline?.name,
+      depIata: f.departure?.airport?.iata,
+      arrIata: f.arrival?.airport?.iata,
+      arrTime: f.arrival?.scheduledTime?.local,
+      status:  f.status,
+    }));
+
+  const nullDepIata  = destArrs.filter(f => !f.departure?.airport?.iata).length;
+  const fromO        = destArrs.filter(f => f.departure?.airport?.iata === o).length;
+
+  res.json({
+    route: `${o}→${d}`,
+    origDeps: {
+      total:        origDeps.length,
+      withArrIata:  origDeps.length - nullArrIata,
+      nullArrIata,
+      matchedToDest: matchedToD,
+      toOtherDest,
+      sample:       toDestSample,
+    },
+    destArrs: {
+      total:       destArrs.length,
+      withDepIata: destArrs.length - nullDepIata,
+      nullDepIata,
+      fromOrigin:  fromO,
+      sample:      fromOriginSample,
+    },
+  });
+});
+// Use this after deploying code changes, or when you suspect stale data.
+// Optional ?route=DXB-DOH to clear a specific route only.
+app.get("/api/cache-clear", (req, res) => {
+  const { route } = req.query;
+  if (route) {
+    // Clear specific route keys
+    const [o, d] = route.toUpperCase().split("-");
+    const keysDeleted = [];
+    for (const key of cache.keys()) {
+      if (key.includes(o) || key.includes(d)) {
+        cache.delete(key);
+        keysDeleted.push(key);
+      }
+    }
+    console.log(`[Cache CLEAR] Route ${route}: deleted ${keysDeleted.length} keys`);
+    return res.json({ cleared: keysDeleted.length, keys: keysDeleted });
+  }
+  // Clear everything
+  const total = cache.size;
+  cache.clear();
+  console.log(`[Cache CLEAR] All ${total} entries cleared`);
+  res.json({ cleared: total, message: "Full cache cleared — next requests will hit API" });
 });
 
 const PORT = process.env.PORT || 3001;
